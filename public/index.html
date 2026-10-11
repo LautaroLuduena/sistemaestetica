@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reservá tu turno</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="booking">
+    <header>
+      <h1 id="biz">Reservá tu turno</h1>
+      <p class="muted" id="biz-info"></p>
+    </header>
+    <div class="steps" id="steps"><span class="on"></span><span></span><span></span><span></span></div>
+
+    <section class="card" id="step-1">
+      <h2>1. Elegí el servicio</h2>
+      <div id="services"><p class="muted">Cargando…</p></div>
+    </section>
+
+    <section class="card hidden" id="step-2">
+      <h2>2. Elegí día y horario</h2>
+      <div class="days" id="days"></div>
+      <div id="slots-wrap"><p class="muted" id="slots-msg">Elegí un día para ver los horarios disponibles.</p><div class="slots" id="slots"></div></div>
+      <div class="row between" style="margin-top:1rem">
+        <button class="secondary" data-back="1">Volver</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="step-3">
+      <h2>3. Tus datos</h2>
+      <form id="form-data">
+        <label>Nombre y apellido<input name="name" required autocomplete="name" /></label>
+        <div class="grid cols-2">
+          <label>Teléfono (WhatsApp)<input name="phone" required type="tel" autocomplete="tel" placeholder="11 2345 6789" /></label>
+          <label>Email<input name="email" type="email" autocomplete="email" placeholder="opcional" /></label>
+        </div>
+        <label>Comentarios<textarea name="notes" rows="2" placeholder="opcional"></textarea></label>
+        <div class="row between">
+          <button type="button" class="secondary" data-back="2">Volver</button>
+          <button type="submit">Continuar</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card hidden" id="step-4">
+      <h2>4. Confirmá tu reserva</h2>
+      <div id="summary"></div>
+      <p class="muted" id="terms"></p>
+      <div class="alert danger hidden" id="err"></div>
+      <div class="row between">
+        <button class="secondary" data-back="3">Volver</button>
+        <button id="confirm">Pagar seña con Mercado Pago</button>
+      </div>
+    </section>
+  </main>
+  <script src="/common.js"></script>
+  <script src="/booking.js"></script>
+</body>
+</html>

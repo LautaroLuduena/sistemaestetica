@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Panel - Estética</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="login-view" class="hidden">
+    <div class="card login">
+      <h1>Ingresar</h1>
+      <div class="alert danger hidden" id="login-error"></div>
+      <form id="login-form">
+        <label>Usuario<input name="username" autocomplete="username" required /></label>
+        <label>Contraseña<input name="password" type="password" autocomplete="current-password" required /></label>
+        <button type="submit" style="width:100%">Ingresar</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="app-view" class="layout hidden">
+    <aside class="sidebar">
+      <div class="brand" id="brand">Estética</div>
+      <nav>
+        <a href="#inicio" data-view="inicio">Inicio</a>
+        <a href="#agenda" data-view="agenda">Agenda</a>
+        <a href="#caja" data-view="caja">Caja</a>
+        <a href="#stock" data-view="stock">Stock</a>
+        <a href="#clientes" data-view="clientes">Clientas</a>
+        <a href="#config" data-view="config">Configuración</a>
+        <a href="/" target="_blank">Ver página de reservas ↗</a>
+      </nav>
+      <div class="bottom">
+        <span id="user-name"></span>
+        <button class="secondary small" id="logout">Salir</button>
+      </div>
+    </aside>
+    <main class="main" id="main"></main>
+  </div>
+
+  <script src="/common.js"></script>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

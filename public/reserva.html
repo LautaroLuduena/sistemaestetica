@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tu reserva</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="booking">
+    <header><h1>Tu reserva</h1></header>
+    <section class="card" id="box"><p class="muted">Cargando…</p></section>
+    <p style="text-align:center"><a href="/">Hacer otra reserva</a></p>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const token = params.get('t');
+    const paymentId = params.get('payment_id') || params.get('collection_id');
+    const mpStatus = params.get('status') || params.get('collection_status');
+    let polls = 0;
+
+    function render(b) {
+      const head = {
+        confirmed: '<div class="alert ok"><b>¡Turno confirmado!</b> Te esperamos.</div>',
+        completed: '<div class="alert ok">Gracias por tu visita.</div>',
+        pending_payment:
+          mpStatus === 'rejected' || mpStatus === 'failure' || mpStatus === 'null'
+            ? '<div class="alert danger">El pago no se completó. Podés intentarlo de nuevo antes de que venza la reserva.</div>'
+            : '<div class="alert warn">Estamos esperando la confirmación del pago de la seña…</div>',
+        expired: '<div class="alert danger">La reserva venció porque no se acreditó la seña a tiempo.</div>',
+        cancelled: '<div class="alert danger">Esta reserva fue cancelada.</div>',
+        no_show: '<div class="alert danger">Turno no asistido.</div>',
+      }[b.status] || '';
+      $('#box').innerHTML = `
+        ${head}
+        ${b.alert ? `<div class="alert warn">${esc(b.alert)}</div>` : ''}
+        <div class="summary-line"><span>Servicio</span><b>${esc(b.service)}</b></div>
+        <div class="summary-line"><span>Día</span><b>${fmtDate(b.date)}</b></div>
+        <div class="summary-line"><span>Horario</span><b>${b.time} hs</b></div>
+        <div class="summary-line"><span>A nombre de</span><b>${esc(b.client_name)}</b></div>
+        <div class="summary-line"><span>Precio</span><span>${fmtMoney(b.price)}</span></div>
+        <div class="summary-line"><span>Seña pagada</span><span>${fmtMoney(b.deposit_paid)}</span></div>
+        <div class="summary-line total"><span>Resto a abonar en el local</span><span>${fmtMoney(Math.max(0, b.price - b.deposit_paid))}</span></div>
+        ${
+          b.status === 'pending_payment'
+            ? `<div class="row end" style="margin-top:1rem"><button id="pay">Pagar seña (${fmtMoney(b.deposit_amount - b.deposit_paid)})</button></div>
+               <p class="muted">La reserva se mantiene hasta las ${new Date(b.expires_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} hs.</p>`
+            : ''
+        }
+        <p class="muted" style="margin-top:1rem">Guardá este link para consultar tu reserva.</p>`;
+      const pay = $('#pay');
+      if (pay)
+        pay.onclick = async () => {
+          pay.disabled = true;
+          try {
+            const r = await api(`/api/public/bookings/${encodeURIComponent(token)}/pay`, { method: 'POST' });
+            location.href = r.init_point;
+          } catch (err) {
+            toast(err.message, 'error');
+            load();
+          }
+        };
+      if (b.status === 'pending_payment' && polls < 30 && mpStatus !== 'rejected' && mpStatus !== 'null') {
+        polls++;
+        setTimeout(load, 4000);
+      }
+    }
+
+    async function load(first) {
+      try {
+        const res = first && paymentId
+          ? await api(`/api/public/bookings/${encodeURIComponent(token)}/check`, { method: 'POST', body: { paymentId } })
+          : await api(`/api/public/bookings/${encodeURIComponent(token)}`);
+        render(res.booking);
+      } catch (err) {
+        $('#box').innerHTML = `<div class="alert danger">${esc(err.message)}</div>`;
+      }
+    }
+    if (!token) $('#box').innerHTML = '<div class="alert danger">Link inválido</div>';
+    else load(true);
+  </script>
+</body>
+</html>

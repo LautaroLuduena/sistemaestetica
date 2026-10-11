@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pago</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="booking">
+    <section class="card" id="box"></section>
+  </main>
+  <script>
+    const s = new URLSearchParams(location.search).get('status') || new URLSearchParams(location.search).get('collection_status');
+    document.getElementById('box').innerHTML =
+      s === 'approved'
+        ? '<div class="alert ok"><b>¡Pago aprobado!</b> Gracias por tu compra.</div>'
+        : s === 'pending' || s === 'in_process'
+          ? '<div class="alert warn">Tu pago está pendiente de acreditación.</div>'
+          : '<div class="alert danger">El pago no se completó.</div>';
+  </script>
+</body>
+</html>

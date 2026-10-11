@@ -1,0 +1,326 @@
+process.env.NODE_ENV = 'test';
+process.env.ADMIN_PASSWORD = 'secreto123';
+
+const { test, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const { bootstrap } = require('../src/server');
+const auth = require('../src/auth');
+const db = require('../src/db');
+const http = require('../src/services/http');
+const settings = require('../src/settings');
+const { addDays, nowInTz } = require('../src/util');
+
+let server;
+let base;
+let cookie;
+
+// ---- Simulación de las APIs de Mercado Pago y Tienda Nube ----
+const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [] };
+
+function reply(status, body) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+const realFetch = http.fetch;
+http.fetch = async (url, opts = {}) => {
+  const u = new URL(url);
+  if (u.host === 'api.mercadopago.com') {
+    if (u.pathname === '/checkout/preferences') {
+      const body = JSON.parse(opts.body);
+      remote.preferences.push(body);
+      return reply(201, { id: `pref-${remote.preferences.length}`, init_point: `https://mp.test/checkout/${remote.preferences.length}` });
+    }
+    const m = u.pathname.match(/^\/v1\/payments\/(\d+)$/);
+    if (m) return remote.payments[m[1]] ? reply(200, remote.payments[m[1]]) : reply(404, { message: 'not found' });
+    const r = u.pathname.match(/^\/v1\/payments\/(\d+)\/refunds$/);
+    if (r) return reply(201, { id: 1, payment_id: r[1] });
+  }
+  if (u.host === 'api.tiendanube.com') {
+    const path = u.pathname.replace(/^\/v1\/\d+/, '');
+    remote.tnCalls.push({ method: opts.method || 'GET', path, body: opts.body ? JSON.parse(opts.body) : null });
+    const order = path.match(/^\/orders\/(\d+)$/);
+    if (order) return reply(200, remote.orders[order[1]]);
+    if (path === '/products' && opts.method === 'POST') return reply(201, { id: 900, variants: [{ id: 901 }] });
+    if (path === '/products' && (opts.method || 'GET') === 'GET') return reply(200, u.searchParams.get('page') === '1' ? remote.products : []);
+    return reply(200, {});
+  }
+  return realFetch(url, opts);
+};
+
+async function call(path, { method = 'GET', body, headers = {} } = {}) {
+  const res = await fetch(base + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', cookie, ...headers },
+    body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = text;
+  }
+  return { status: res.status, data };
+}
+
+const waitQueue = () => new Promise((r) => setTimeout(r, 600));
+
+// Un día abierto dentro de la ventana de reservas.
+const day = () => addDays(nowInTz(settings.get('timezone')).date, 3);
+
+before(async () => {
+  const app = bootstrap({ dbFile: ':memory:' });
+  auth.ensureAdmin();
+  server = app.listen(0);
+  await new Promise((r) => server.once('listening', r));
+  base = `http://127.0.0.1:${server.address().port}`;
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'secreto123' }),
+  });
+  cookie = res.headers.get('set-cookie').split(';')[0];
+  // Abierto todos los días de 10 a 12 para que los tests no dependan del día de la semana.
+  await call('/api/admin/hours', { method: 'PUT', body: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, start_time: '10:00', end_time: '12:00' })) });
+  settings.set({ mp_access_token: 'TEST-123', public_url: 'https://estetica.test', tn_store_id: '555', tn_access_token: 'tn-token' });
+});
+
+after(() => server.close());
+
+beforeEach(() => {
+  remote.tnCalls.length = 0;
+});
+
+test('rutas del panel requieren sesión', async () => {
+  const res = await fetch(`${base}/api/admin/dashboard`);
+  assert.equal(res.status, 401);
+});
+
+test('horarios disponibles respetan duración y capacidad', async () => {
+  const { data } = await call(`/api/public/slots?serviceId=1&date=${day()}`);
+  // servicio de 30 min, franjas cada 30 min entre 10 y 12
+  assert.deepEqual(data.slots, ['10:00', '10:30', '11:00', '11:30']);
+  const long = await call(`/api/public/slots?serviceId=2&date=${day()}`);
+  assert.deepEqual(long.data.slots, ['10:00', '10:30', '11:00']);
+});
+
+test('reserva web: queda pendiente, genera seña y se confirma con el webhook de Mercado Pago', async () => {
+  const res = await call('/api/public/bookings', {
+    method: 'POST',
+    body: { serviceId: 1, date: day(), time: '10:00', name: 'Ana Pérez', phone: '11 2345-6789', email: 'ana@test.com' },
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.data.booking.status, 'pending_payment');
+  assert.ok(res.data.init_point.startsWith('https://mp.test/checkout/'));
+  const pref = remote.preferences.at(-1);
+  assert.equal(pref.items[0].unit_price, 8000);
+  assert.equal(pref.binary_mode, true);
+  assert.equal(pref.notification_url, 'https://estetica.test/api/webhooks/mercadopago?source_news=webhooks');
+  const apptId = Number(pref.external_reference.split(':')[1]);
+
+  // El horario queda bloqueado mientras se espera el pago.
+  const slots = await call(`/api/public/slots?serviceId=1&date=${day()}`);
+  assert.ok(!slots.data.slots.includes('10:00'));
+  const dup = await call('/api/public/bookings', { method: 'POST', body: { serviceId: 1, date: day(), time: '10:00', name: 'Otra', phone: '1199998888' } });
+  assert.equal(dup.status, 409);
+
+  remote.payments['111'] = { id: 111, status: 'approved', external_reference: `appt:${apptId}`, transaction_amount: 8000 };
+  const hook = await call('/api/webhooks/mercadopago?data.id=111&type=payment', { method: 'POST', body: { type: 'payment', data: { id: '111' } } });
+  assert.equal(hook.status, 200);
+  // Notificación repetida: no se duplica la seña.
+  await call('/api/webhooks/mercadopago?data.id=111&type=payment', { method: 'POST', body: { type: 'payment', data: { id: '111' } } });
+
+  const appt = (await call(`/api/admin/appointments/${apptId}`)).data;
+  assert.equal(appt.status, 'confirmed');
+  assert.equal(appt.deposit_paid, 8000);
+  assert.equal(appt.balance, 17000);
+  assert.equal(appt.movements.length, 1);
+  assert.equal(appt.movements[0].payment_method, 'mercadopago');
+});
+
+test('seña acreditada después de vencer con el horario ocupado queda marcada para revisar', async () => {
+  const res = await call('/api/public/bookings', { method: 'POST', body: { serviceId: 1, date: day(), time: '11:30', name: 'Bea', phone: '1155550000' } });
+  const apptId = Number(remote.preferences.at(-1).external_reference.split(':')[1]);
+  // vence la reserva y otra persona toma el horario
+  db.run(`UPDATE appointments SET expires_at = datetime('now', '-1 minute') WHERE id = ?`, apptId);
+  const other = await call('/api/admin/appointments', { method: 'POST', body: { serviceId: 1, date: day(), time: '11:30', name: 'Carla', phone: '1144440000' } });
+  assert.equal(other.status, 201, JSON.stringify(other.data));
+
+  remote.payments['222'] = { id: 222, status: 'approved', external_reference: `appt:${apptId}`, transaction_amount: 8000 };
+  const check = await call(`/api/public/bookings/${res.data.booking.token}/check`, { method: 'POST', body: { paymentId: '222' } });
+  assert.equal(check.data.booking.status, 'expired');
+  assert.ok(check.data.booking.alert);
+  const appt = (await call(`/api/admin/appointments/${apptId}`)).data;
+  assert.equal(appt.deposit_paid, 8000);
+  assert.match(appt.alert, /reprogramar o devolver/);
+});
+
+test('firma de webhook de Mercado Pago inválida es rechazada', async () => {
+  settings.set({ mp_webhook_secret: 'clave' });
+  try {
+    const bad = await call('/api/webhooks/mercadopago?data.id=111&type=payment', {
+      method: 'POST',
+      body: { type: 'payment', data: { id: '111' } },
+      headers: { 'x-signature': 'ts=1,v1=abc', 'x-request-id': 'r1' },
+    });
+    assert.equal(bad.status, 401);
+    const ts = '1700000000';
+    const v1 = crypto.createHmac('sha256', 'clave').update(`id:111;request-id:r1;ts:${ts};`).digest('hex');
+    const ok = await call('/api/webhooks/mercadopago?data.id=111&type=payment', {
+      method: 'POST',
+      body: { type: 'payment', data: { id: '111' } },
+      headers: { 'x-signature': `ts=${ts},v1=${v1}`, 'x-request-id': 'r1' },
+    });
+    assert.equal(ok.status, 200);
+  } finally {
+    settings.set({ mp_webhook_secret: '' });
+  }
+});
+
+test('stock: alta, ajustes y sincronización con Tienda Nube', async () => {
+  const created = await call('/api/admin/products', { method: 'POST', body: { name: 'Crema post bronceado', sku: 'CR-1', price: 9000, stock: 10, min_stock: 2 } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.stock, 10);
+  await waitQueue();
+  const post = remote.tnCalls.find((c) => c.method === 'POST' && c.path === '/products');
+  assert.ok(post, 'se crea el producto en Tienda Nube');
+  assert.equal(post.body.variants[0].stock, 10);
+  assert.equal(post.body.variants[0].sku, 'CR-1');
+
+  remote.tnCalls.length = 0;
+  const adj = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'remove', quantity: 3, reason: 'Rotura' } });
+  assert.equal(adj.data.stock, 7);
+  const set = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'set', quantity: 12, reason: 'Conteo' } });
+  assert.equal(set.data.stock, 12);
+  await waitQueue();
+  const puts = remote.tnCalls.filter((c) => c.method === 'PUT' && c.path === '/products/900/variants/901');
+  assert.ok(puts.length >= 1);
+  assert.equal(puts.at(-1).body.stock, 12);
+
+  const noReason = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'add', quantity: 1 } });
+  assert.equal(noReason.status, 400);
+  const mv = (await call(`/api/admin/stock-movements?productId=${created.data.id}`)).data;
+  assert.deepEqual(mv.map((m) => m.quantity), [5, -3, 10]);
+});
+
+test('Tienda Nube: una orden descuenta stock local sin reenviarlo, y la cancelación lo repone', async () => {
+  const p = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
+  remote.orders['7001'] = { id: 7001, number: 150, products: [{ product_id: 900, variant_id: 901, quantity: 2, sku: 'CR-1', name: 'Crema' }] };
+  remote.tnCalls.length = 0;
+
+  const created = await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 7001 } });
+  assert.equal(created.status, 200);
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 7001 } }); // duplicado
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', p.id).stock, p.stock - 2);
+  await waitQueue();
+  assert.ok(!remote.tnCalls.some((c) => c.method === 'PUT'), 'no se reenvía el stock a Tienda Nube');
+
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/cancelled', id: 7001 } });
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', p.id).stock, p.stock);
+
+  // otra tienda: se ignora
+  remote.orders['7002'] = { id: 7002, products: [{ product_id: 900, variant_id: 901, quantity: 5 }] };
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 999, event: 'order/created', id: 7002 } });
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', p.id).stock, p.stock);
+});
+
+test('Tienda Nube: webhook con HMAC inválido es rechazado cuando hay client secret', async () => {
+  settings.set({ tn_client_secret: 'sec' });
+  try {
+    const bad = await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 1 }, headers: { 'x-linkedstore-hmac-sha256': 'nope' } });
+    assert.equal(bad.status, 401);
+    const raw = JSON.stringify({ store_id: 555, event: 'app/uninstalled', id: 1 });
+    const sig = crypto.createHmac('sha256', 'sec').update(raw).digest('hex');
+    const ok = await call('/api/webhooks/tiendanube', { method: 'POST', body: raw, headers: { 'x-linkedstore-hmac-sha256': sig } });
+    assert.equal(ok.status, 200);
+  } finally {
+    settings.set({ tn_client_secret: '' });
+  }
+});
+
+test('Tienda Nube: importar productos vincula por SKU y crea los nuevos', async () => {
+  remote.products = [
+    { id: 900, name: { es: 'Crema post bronceado' }, variants: [{ id: 901, sku: 'CR-1', price: '9000.00', stock: 4, values: [] }] },
+    { id: 950, name: { es: 'Aceite' }, description: { es: '<p>Bronceador</p>' }, variants: [{ id: 951, sku: 'AC-1', price: '5000.00', stock: 6, values: [{ es: '100ml' }] }] },
+  ];
+  const r = await call('/api/admin/integrations/tiendanube/import', { method: 'POST', body: { stockFrom: 'remote' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.created, 1);
+  const aceite = db.one(`SELECT * FROM products WHERE sku = 'AC-1'`);
+  assert.equal(aceite.name, 'Aceite - 100ml');
+  assert.equal(aceite.stock, 6);
+  assert.equal(aceite.description, 'Bronceador');
+  assert.equal(db.one(`SELECT stock FROM products WHERE sku = 'CR-1'`).stock, 4);
+});
+
+test('caja: no se puede vender con la caja cerrada; venta, saldo de turno, anulación y cierre', async () => {
+  const closed = await call('/api/admin/sales', { method: 'POST', body: { items: [{ description: 'x', unitPrice: 10 }], method: 'efectivo' } });
+  assert.equal(closed.status, 409);
+
+  const open = await call('/api/admin/cash/open', { method: 'POST', body: { openingAmount: 5000 } });
+  assert.equal(open.status, 201);
+
+  const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
+  const appt = db.one(`SELECT id FROM appointments WHERE status = 'confirmed' AND deposit_paid > 0 ORDER BY id LIMIT 1`);
+
+  const sale = await call('/api/admin/sales', {
+    method: 'POST',
+    body: { items: [{ productId: cr.id, quantity: 2 }, { appointmentId: appt.id }], method: 'efectivo', discount: 1000 },
+  });
+  assert.equal(sale.status, 201, JSON.stringify(sale.data));
+  // 2 x 9000 + saldo 17000 - 1000
+  assert.equal(sale.data.sale.total, 34000);
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 2);
+  const a = (await call(`/api/admin/appointments/${appt.id}`)).data;
+  assert.equal(a.status, 'completed');
+  assert.equal(a.balance, 0);
+
+  const tooMany = await call('/api/admin/sales', { method: 'POST', body: { items: [{ productId: cr.id, quantity: 999 }], method: 'debito' } });
+  assert.equal(tooMany.status, 409);
+
+  const card = await call('/api/admin/sales', { method: 'POST', body: { items: [{ productId: cr.id, quantity: 1 }], method: 'debito' } });
+  const cancel = await call(`/api/admin/sales/${card.data.sale.id}/cancel`, { method: 'POST' });
+  assert.equal(cancel.data.status, 'cancelled');
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 2);
+
+  await call('/api/admin/cash/movements', { method: 'POST', body: { type: 'expense', method: 'efectivo', amount: 2000, description: 'Limpieza' } });
+
+  const state = (await call('/api/admin/cash')).data;
+  assert.equal(state.session.expectedCash, 5000 + 34000 - 2000);
+  assert.equal(state.session.byMethod.debito, 0);
+
+  const close = await call('/api/admin/cash/close', { method: 'POST', body: { countedAmount: 36500 } });
+  assert.equal(close.data.session.difference, -500);
+  assert.equal((await call('/api/admin/cash')).data.session, null);
+});
+
+test('caja: cobro con link de Mercado Pago queda pendiente y se completa con el pago', async () => {
+  await call('/api/admin/cash/open', { method: 'POST', body: { openingAmount: 0 } });
+  const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
+  const res = await call('/api/admin/sales', { method: 'POST', body: { items: [{ productId: cr.id, quantity: 1 }], method: 'mp_link' } });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  assert.equal(res.data.sale.status, 'pending');
+  assert.ok(res.data.qr.startsWith('data:image/png'));
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock, 'no descuenta hasta cobrar');
+
+  remote.payments['333'] = { id: 333, status: 'approved', external_reference: `sale:${res.data.sale.id}`, transaction_amount: 9000 };
+  await call('/api/webhooks/mercadopago', { method: 'POST', body: { type: 'payment', data: { id: '333' } } });
+  const sale = (await call(`/api/admin/sales/${res.data.sale.id}`)).data;
+  assert.equal(sale.status, 'paid');
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 1);
+  assert.equal((await call('/api/admin/cash')).data.session.byMethod.mercadopago, 9000);
+});
+
+test('cancelar turno devolviendo la seña por Mercado Pago', async () => {
+  const res = await call('/api/public/bookings', { method: 'POST', body: { serviceId: 1, date: addDays(day(), 1), time: '10:00', name: 'Dana', phone: '1133332222' } });
+  const apptId = Number(remote.preferences.at(-1).external_reference.split(':')[1]);
+  remote.payments['444'] = { id: 444, status: 'approved', external_reference: `appt:${apptId}`, transaction_amount: 8000 };
+  await call(`/api/public/bookings/${res.data.booking.token}/check`, { method: 'POST', body: { paymentId: '444' } });
+  const cancel = await call(`/api/admin/appointments/${apptId}/cancel`, { method: 'POST', body: { refund: true } });
+  assert.equal(cancel.status, 200, JSON.stringify(cancel.data));
+  assert.equal(cancel.data.status, 'cancelled');
+  assert.equal(cancel.data.deposit_paid, 0);
+  const again = await call(`/api/admin/appointments/${apptId}/cancel`, { method: 'POST', body: { refund: true } });
+  assert.equal(again.status, 409);
+});
