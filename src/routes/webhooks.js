@@ -22,6 +22,11 @@ router.post('/mercadopago', async (req, res) => {
     await payments.processPayment(dataId);
     res.sendStatus(200);
   } catch (err) {
+    if (err.status === 404) {
+      // Pago inexistente (ej. la notificación de prueba del panel de Mercado Pago): no tiene sentido que reintente.
+      log('mercadopago', 'warn', `Notificación recibida para el pago ${dataId}, que no existe en la cuenta (¿simulación?)`);
+      return res.sendStatus(200);
+    }
     log('mercadopago', 'error', `Error procesando el pago ${dataId}: ${err.message}`);
     res.sendStatus(500); // Mercado Pago reintenta
   }
