@@ -9,6 +9,7 @@ const cash = require('../services/cash');
 const payments = require('../services/payments');
 const mp = require('../services/mercadopago');
 const tn = require('../services/tiendanube');
+const whatsapp = require('../services/whatsapp');
 const { recent } = require('../services/log');
 const { badRequest, notFound, conflict, money, int, requireText, isDate, isTime, nowInTz } = require('../util');
 
@@ -136,6 +137,9 @@ router.post('/appointments', (req, res) => {
 router.get('/appointments/:id', (req, res) => {
   const appt = agenda.getAppointment(Number(req.params.id));
   appt.movements = db.all('SELECT * FROM cash_movements WHERE appointment_id = ? ORDER BY id', appt.id);
+  appt.wa_link = whatsapp.manualLink(appt);
+  appt.wa_configured = whatsapp.isConfigured();
+  appt.mp_configured = mp.isConfigured();
   res.json(appt);
 });
 
@@ -159,7 +163,21 @@ router.post('/appointments/:id/cancel', async (req, res) => {
 
 router.post('/appointments/:id/deposit', (req, res) => {
   const { amount, method } = req.body || {};
-  res.json(cash.chargeDeposit(Number(req.params.id), { amount, method }, uid(req)));
+  const appt = cash.chargeDeposit(Number(req.params.id), { amount, method }, uid(req));
+  whatsapp.notifyConfirmed(appt.id);
+  res.json(appt);
+});
+
+// Consulta en Mercado Pago si la seña del turno ya se pagó.
+router.post('/appointments/:id/check-payment', async (req, res) => {
+  const appt = agenda.getAppointment(Number(req.params.id));
+  const result = await payments.checkReference('appt', appt.id);
+  res.json({ ...result, appointment: agenda.getAppointment(appt.id) });
+});
+
+// Envía (o reenvía) la confirmación por WhatsApp.
+router.post('/appointments/:id/whatsapp', async (req, res) => {
+  res.json(await whatsapp.sendConfirmation(Number(req.params.id), { force: true, throwErrors: true }));
 });
 
 // Link de Mercado Pago para que la clienta pague la seña (para turnos cargados por teléfono/WhatsApp).
@@ -385,6 +403,7 @@ router.get('/integrations', (req, res) => {
   res.json({
     publicUrl: settings.publicUrl(),
     mercadopago: { configured: mp.isConfigured(), log: recent('mercadopago', 30) },
+    whatsapp: { configured: whatsapp.isConfigured(), enabled: whatsapp.isEnabled(), fields: whatsapp.FIELD_NAMES, log: recent('whatsapp', 30) },
     tiendanube: {
       configured: tn.isConfigured(),
       storeId: settings.get('tn_store_id'),
@@ -400,6 +419,10 @@ router.post('/integrations/mercadopago/test', async (req, res) => {
   const me = await mp.me();
   res.json({ ok: true, account: me.nickname || me.email || me.id, test: String(settings.get('mp_access_token')).startsWith('TEST-') });
 });
+
+router.post('/integrations/mercadopago/check-now', async (req, res) => res.json(await payments.reconcilePending({ force: true })));
+
+router.post('/integrations/whatsapp/test', async (req, res) => res.json(await whatsapp.sendTest(req.body && req.body.phone)));
 
 router.post('/integrations/tiendanube/test', async (req, res) => res.json({ ok: true, store: await tn.testConnection() }));
 

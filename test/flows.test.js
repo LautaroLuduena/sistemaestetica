@@ -16,7 +16,7 @@ let base;
 let cookie;
 
 // ---- Simulación de las APIs de Mercado Pago y Tienda Nube ----
-const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [] };
+const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [], waMessages: [], waFail: null };
 
 function reply(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -31,10 +31,20 @@ http.fetch = async (url, opts = {}) => {
       remote.preferences.push(body);
       return reply(201, { id: `pref-${remote.preferences.length}`, init_point: `https://mp.test/checkout/${remote.preferences.length}` });
     }
+    if (u.pathname === '/v1/payments/search') {
+      const ref = u.searchParams.get('external_reference');
+      return reply(200, { results: Object.values(remote.payments).filter((p) => p.external_reference === ref) });
+    }
     const m = u.pathname.match(/^\/v1\/payments\/(\d+)$/);
     if (m) return remote.payments[m[1]] ? reply(200, remote.payments[m[1]]) : reply(404, { message: 'not found' });
     const r = u.pathname.match(/^\/v1\/payments\/(\d+)\/refunds$/);
     if (r) return reply(201, { id: 1, payment_id: r[1] });
+  }
+  if (u.host === 'graph.facebook.com') {
+    const body = JSON.parse(opts.body);
+    remote.waMessages.push(body);
+    if (remote.waFail) return reply(400, { error: { message: remote.waFail } });
+    return reply(200, { messages: [{ id: `wamid.${remote.waMessages.length}` }] });
   }
   if (u.host === 'api.tiendanube.com') {
     const path = u.pathname.replace(/^\/v1\/\d+/, '');
@@ -323,4 +333,77 @@ test('cancelar turno devolviendo la seña por Mercado Pago', async () => {
   assert.equal(cancel.data.deposit_paid, 0);
   const again = await call(`/api/admin/appointments/${apptId}/cancel`, { method: 'POST', body: { refund: true } });
   assert.equal(again.status, 409);
+});
+
+test('WhatsApp: normaliza teléfonos argentinos', () => {
+  const { toWhatsAppNumber } = require('../src/services/whatsapp');
+  assert.equal(toWhatsAppNumber('11 2345-6789'), '5491123456789');
+  assert.equal(toWhatsAppNumber('011 15 2345-6789'), '5491123456789');
+  assert.equal(toWhatsAppNumber('+54 9 11 2345 6789'), '5491123456789');
+  assert.equal(toWhatsAppNumber('351 15 555 1234'), '5493515551234');
+  assert.equal(toWhatsAppNumber('0351 4555123'), '5493514555123');
+  assert.equal(toWhatsAppNumber('1234'), null);
+});
+
+test('verificación automática: encuentra la seña pagada sin webhook y envía la confirmación por WhatsApp', async () => {
+  settings.set({ wa_enabled: '1', wa_token: 'wa-token', wa_phone_number_id: '777', wa_template_name: 'confirmacion_turno', wa_info: 'Venir sin cremas.\nRopa oscura.' });
+  remote.waMessages.length = 0;
+  const date = addDays(day(), 2);
+  const res = await call('/api/public/bookings', { method: 'POST', body: { serviceId: 1, date, time: '11:00', name: 'Eva Gómez', phone: '011 15 4444-5555' } });
+  const apptId = Number(remote.preferences.at(-1).external_reference.split(':')[1]);
+  assert.equal(res.data.booking.status, 'pending_payment');
+
+  // Todavía sin pagos: no cambia nada.
+  const payments = require('../src/services/payments');
+  let r = await payments.reconcilePending();
+  assert.equal(r.approved, 0);
+
+  // Llega un pago aprobado pero el webhook nunca se recibe.
+  remote.payments['555'] = { id: 555, status: 'approved', external_reference: `appt:${apptId}`, transaction_amount: 8000 };
+  db.run('UPDATE appointments SET mp_checked_at = NULL WHERE id = ?', apptId);
+  r = await payments.reconcilePending();
+  assert.equal(r.approved, 1);
+  const appt = (await call(`/api/admin/appointments/${apptId}`)).data;
+  assert.equal(appt.status, 'confirmed');
+  assert.equal(appt.deposit_paid, 8000);
+
+  await new Promise((done) => setTimeout(done, 100));
+  assert.equal(remote.waMessages.length, 1);
+  const msg = remote.waMessages[0];
+  assert.equal(msg.to, '5491144445555');
+  assert.equal(msg.template.name, 'confirmacion_turno');
+  const [nombre, servicio, fecha, hora, info] = msg.template.components[0].parameters.map((p) => p.text);
+  assert.deepEqual([nombre, servicio, hora, info], ['Eva', 'Bronceado orgánico (spray)', '11:00 hs', 'Venir sin cremas. · Ropa oscura.']);
+  assert.match(fecha, /^[A-ZÁÉÍÓÚ][a-záéíóú]+, \d{1,2} de [a-z]+$/);
+  assert.equal((await call(`/api/admin/appointments/${apptId}`)).data.wa_status, 'sent');
+
+  // Otra pasada no duplica el pago ni el mensaje.
+  db.run('UPDATE appointments SET mp_checked_at = NULL WHERE id = ?', apptId);
+  await payments.reconcilePending();
+  await new Promise((done) => setTimeout(done, 100));
+  assert.equal(remote.waMessages.length, 1);
+  assert.equal((await call(`/api/admin/appointments/${apptId}`)).data.deposit_paid, 8000);
+});
+
+test('WhatsApp: el error de envío queda registrado en el turno y se puede reintentar', async () => {
+  const created = await call('/api/admin/appointments', { method: 'POST', body: { serviceId: 1, date: addDays(day(), 3), time: '10:00', name: 'Flor', phone: '1166667777' } });
+  const id = created.data.id;
+  remote.waFail = 'Template name does not exist';
+  // Cobrar la seña en el local también dispara la confirmación (acá falla por la plantilla).
+  await call('/api/admin/cash/open', { method: 'POST', body: { openingAmount: 0 } });
+  await call(`/api/admin/appointments/${id}/deposit`, { method: 'POST', body: { method: 'efectivo', amount: 8000 } });
+  await new Promise((done) => setTimeout(done, 100));
+  assert.equal((await call(`/api/admin/appointments/${id}`)).data.wa_status, 'error');
+  const manual = await call(`/api/admin/appointments/${id}/whatsapp`, { method: 'POST' });
+  assert.equal(manual.status, 502);
+  let appt = (await call(`/api/admin/appointments/${id}`)).data;
+  assert.equal(appt.wa_status, 'error');
+  assert.match(appt.wa_error, /Template name/);
+  assert.ok(appt.wa_link.startsWith('https://wa.me/5491166667777?text='));
+
+  remote.waFail = null;
+  const retry = await call(`/api/admin/appointments/${id}/whatsapp`, { method: 'POST' });
+  assert.equal(retry.status, 200);
+  appt = (await call(`/api/admin/appointments/${id}`)).data;
+  assert.equal(appt.wa_status, 'sent');
 });

@@ -64,6 +64,13 @@ async function createPreference({ title, amount, externalReference, payer = {}, 
 
 const getPayment = (paymentId) => call(`/v1/payments/${encodeURIComponent(paymentId)}`);
 
+// Busca los pagos asociados a una referencia (ej. "appt:12"), los más nuevos primero.
+async function searchPayments(externalReference) {
+  const q = new URLSearchParams({ external_reference: externalReference, sort: 'date_created', criteria: 'desc', limit: '20' });
+  const res = await call(`/v1/payments/search?${q}`);
+  return (res && res.results) || [];
+}
+
 function refund(paymentId, amount) {
   return call(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
     method: 'POST',
@@ -99,4 +106,4 @@ function verifySignature(headers, dataId) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-module.exports = { isConfigured, createPreference, getPayment, refund, me, verifySignature };
+module.exports = { isConfigured, createPreference, getPayment, searchPayments, refund, me, verifySignature };

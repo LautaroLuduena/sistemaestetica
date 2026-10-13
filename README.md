@@ -53,6 +53,29 @@ Cómo funciona la seña:
 - Si no se paga a tiempo, el turno **vence** y el horario se libera. Si el pago llega tarde y el horario ya se ocupó, el turno queda marcado para reprogramar o devolver.
 - Al cobrar en el local, el saldo ya descuenta la seña. Al cancelar un turno se puede **devolver la seña** automáticamente.
 
+### Verificación automática de pagos
+
+Además del webhook, el sistema consulta a Mercado Pago **cada minuto** si las reservas que esperan la seña (y los cobros con link/QR de la caja) ya se pagaron, buscando los pagos por su referencia. Así el turno se confirma aunque el webhook falle o no esté configurado. Se puede desactivar en *Configuración → Mercado Pago*, y en cada turno hay un botón **Verificar pago en Mercado Pago**.
+
+## WhatsApp (confirmación automática del turno)
+
+Cuando se acredita la seña (online o cobrada en el local), el sistema le envía a la clienta un WhatsApp confirmando el turno, con las **indicaciones** configuradas (cómo venir preparada, etc.).
+
+Usa la API oficial de WhatsApp de Meta (WhatsApp Cloud API), que exige una **plantilla aprobada**. Los pasos están en *Configuración → WhatsApp*. Resumen:
+
+1. App de tipo Empresa en [developers.facebook.com](https://developers.facebook.com/apps) con el producto WhatsApp y un número verificado.
+2. Token permanente de un usuario de sistema (permisos `whatsapp_business_messaging` y `whatsapp_business_management`).
+3. Plantilla de categoría *Utilidad*, idioma Español (ARG), llamada `confirmacion_turno`:
+   ```
+   ¡Hola {{1}}! Tu turno de {{2}} está confirmado ✅
+   📅 {{3}} a las {{4}}
+   Para tener en cuenta: {{5}}
+   ¡Te esperamos!
+   ```
+4. Cargar token, Phone number ID y plantilla, enviar un mensaje de prueba y activar el envío automático.
+
+Meta cobra cada mensaje de plantilla de utilidad (unos pocos centavos de dólar). Mientras no esté configurado, cada turno tiene el botón **Abrir WhatsApp con el mensaje** para mandarlo a mano.
+
 ## Tienda Nube (productos y stock)
 
 **Opción A (recomendada)** – crear una app:
@@ -90,7 +113,8 @@ src/
   auth.js              usuarios y sesiones
   services/
     agenda.js          disponibilidad, reservas y estados de turnos
-    payments.js        señas y cobros con Mercado Pago
+    payments.js        señas, cobros y verificación automática de pagos
+    whatsapp.js        confirmación de turnos por WhatsApp (API de Meta)
     mercadopago.js     cliente de la API de Mercado Pago
     tiendanube.js      cliente y sincronización con Tienda Nube
     stock.js           movimientos de stock

@@ -22,6 +22,20 @@ const DEFAULTS = {
   mp_public_key: '',
   mp_webhook_secret: '',
 
+  // Verificación automática de pagos pendientes contra Mercado Pago
+  mp_auto_check: '1',
+
+  // WhatsApp (API oficial de Meta - WhatsApp Cloud API)
+  wa_enabled: '0',
+  wa_token: '',
+  wa_phone_number_id: '',
+  wa_template_name: 'confirmacion_turno',
+  wa_template_lang: 'es_AR',
+  // Datos que completan las variables {{1}}, {{2}}, ... de la plantilla, en orden.
+  wa_template_vars: 'nombre,servicio,fecha,hora,indicaciones',
+  wa_info:
+    'Venir con la piel limpia, sin cremas ni desodorante. Exfoliarse el día anterior. Usar ropa holgada y oscura. No bañarse durante 8 horas después de la sesión.',
+
   // Tienda Nube
   tn_client_id: '',
   tn_client_secret: '',
@@ -33,7 +47,7 @@ const DEFAULTS = {
 };
 
 // Claves que nunca se devuelven completas al frontend.
-const SECRET_KEYS = ['mp_access_token', 'mp_webhook_secret', 'tn_client_secret', 'tn_access_token'];
+const SECRET_KEYS = ['mp_access_token', 'mp_webhook_secret', 'tn_client_secret', 'tn_access_token', 'wa_token'];
 
 function getAll() {
   const rows = db.all('SELECT key, value FROM settings');

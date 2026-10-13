@@ -206,7 +206,24 @@ function open(file) {
   const conn = new DatabaseSync(file);
   conn.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   conn.exec(SCHEMA);
+  migrate(conn);
   return conn;
+}
+
+// Columnas agregadas después de la primera versión (las bases existentes no las tienen).
+const MIGRATIONS = [
+  ['appointments', 'wa_status', 'TEXT'],
+  ['appointments', 'wa_error', 'TEXT'],
+  ['appointments', 'wa_sent_at', 'TEXT'],
+  ['appointments', 'mp_checked_at', 'TEXT'],
+  ['sales', 'mp_checked_at', 'TEXT'],
+];
+
+function migrate(conn) {
+  for (const [table, column, type] of MIGRATIONS) {
+    const cols = conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(column)) conn.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }
 
 function init(file) {

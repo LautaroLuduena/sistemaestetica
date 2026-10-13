@@ -6,6 +6,7 @@ const settings = require('./settings');
 const agenda = require('./services/agenda');
 const stock = require('./services/stock');
 const tn = require('./services/tiendanube');
+const payments = require('./services/payments');
 const { log } = require('./services/log');
 const { HttpError } = require('./util');
 
@@ -100,6 +101,8 @@ if (require.main === module) {
     console.log('──────────────────────────────────────────────');
   }
   setInterval(() => agenda.expirePending(), 60e3).unref();
+  // Verificación automática de pagos pendientes en Mercado Pago (respaldo del webhook).
+  setInterval(() => payments.reconcilePending().catch((err) => console.error('reconcilePending', err)), 60e3).unref();
   const port = Number(process.env.PORT) || 3000;
   app.listen(port, () => {
     console.log(`Sistema funcionando en http://localhost:${port}`);

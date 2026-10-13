@@ -178,6 +178,12 @@ function apptList(list) {
     .join('');
 }
 
+function waBadge(a) {
+  if (a.wa_status === 'sent') return `<span class="badge ok">WhatsApp enviado ${fmtDateTime(a.wa_sent_at)}</span>`;
+  if (a.wa_status === 'error') return `<span class="badge danger" title="${esc(a.wa_error || '')}">WhatsApp no enviado</span> <small class="muted">${esc(a.wa_error || '')}</small>`;
+  return '';
+}
+
 function bindApptClicks(root = document) {
   $$('[data-appt]', root).forEach((el) => el.addEventListener('click', () => openAppointment(Number(el.dataset.appt))));
 }
@@ -325,6 +331,7 @@ async function openAppointment(id) {
     ${a.balance_paid ? `<div class="summary-line"><span>Cobrado en local</span><span>${fmtMoney(a.balance_paid)}</span></div>` : ''}
     <div class="summary-line total"><span>Saldo</span><span>${fmtMoney(a.balance)}</span></div>
     <small class="muted">Origen: ${a.source === 'web' ? 'reserva web' : 'cargado en el local'}${a.mp_payment_id ? ` · Pago MP #${a.mp_payment_id}` : ''}</small>
+    <div style="margin-top:0.4rem">${waBadge(a)}</div>
     <label style="margin-top:1rem">Notas<textarea id="notes" rows="2">${esc(a.notes || '')}</textarea></label>
 
     <div class="row" style="margin-top:0.5rem">
@@ -335,6 +342,11 @@ async function openAppointment(id) {
       ${active || a.status === 'expired' ? '<button class="secondary" id="move">Reprogramar</button>' : ''}
       ${a.status === 'confirmed' ? '<button class="secondary" id="noshow">No vino</button>' : ''}
       ${a.status !== 'cancelled' && a.status !== 'completed' ? '<button class="danger" id="cancel">Cancelar turno</button>' : ''}
+    </div>
+    <div class="row" style="margin-top:0.5rem">
+      ${a.mp_configured && a.mp_preference_id && pendingDeposit > 0 ? '<button class="secondary small" id="checkpay">Verificar pago en Mercado Pago</button>' : ''}
+      ${a.wa_configured && ['confirmed', 'completed'].includes(a.status) ? `<button class="secondary small" id="wasend">${a.wa_status === 'sent' ? 'Reenviar' : 'Enviar'} confirmación por WhatsApp</button>` : ''}
+      ${a.wa_link ? `<a class="btn secondary small" target="_blank" href="${esc(a.wa_link)}">Abrir WhatsApp con el mensaje</a>` : ''}
     </div>
     <div id="extra"></div>
     <div class="actions"><button class="secondary" data-close>Cerrar</button></div>`,
@@ -359,6 +371,16 @@ async function openAppointment(id) {
     }
     location.hash = 'caja';
     if (app.view === 'caja') route();
+  });
+  on('#checkpay', async () => {
+    const r = await act(() => adminApi(`/api/admin/appointments/${id}/check-payment`, { method: 'POST' }));
+    if (!r) return;
+    toast(r.approved ? '¡Pago encontrado! Turno confirmado' : r.payments ? 'Hay intentos de pago pero ninguno aprobado todavía' : 'Todavía no hay pagos para este turno');
+    if (r.approved) refresh();
+  });
+  on('#wasend', async () => {
+    const r = await act(() => adminApi(`/api/admin/appointments/${id}/whatsapp`, { method: 'POST' }), 'Mensaje de WhatsApp enviado');
+    if (r) refresh();
   });
   on('#dep', () => {
     $('#extra', m).innerHTML = `<form id="depf" class="card" style="margin-top:1rem"><h3>Cobrar seña</h3>
@@ -1003,6 +1025,7 @@ VIEWS.config = async () => {
     ['servicios', 'Servicios'],
     ['horarios', 'Horarios'],
     ['mp', 'Mercado Pago'],
+    ['wa', 'WhatsApp'],
     ['tn', 'Tienda Nube'],
     ['usuarios', 'Usuarios'],
   ];
@@ -1146,9 +1169,14 @@ const CONFIG_TABS = {
       <label>Public Key<input name="mp_public_key" value="${esc(s.mp_public_key)}" autocomplete="off" /></label>
       <label>Clave secreta de webhooks (opcional, recomendado)<input name="mp_webhook_secret" value="${esc(s.mp_webhook_secret)}" autocomplete="off" />
         <small>En tu aplicación → Webhooks: configurá la URL <code>${esc(webhook)}</code> con el evento "Pagos" y copiá acá la clave secreta.</small></label>
-      <div class="row end"><button type="button" class="secondary" id="test">Probar conexión</button><button>Guardar</button></div>
+      <label class="check"><input type="checkbox" name="mp_auto_check" ${s.mp_auto_check === '1' ? 'checked' : ''} /> Verificar automáticamente cada minuto si las reservas pendientes ya se pagaron</label>
+      <div class="row end"><button type="button" class="secondary" id="checknow">Verificar pagos pendientes ahora</button><button type="button" class="secondary" id="test">Probar conexión</button><button>Guardar</button></div>
     </form>
     <div class="card"><h2>Actividad reciente</h2>${logTable(integ.mercadopago.log)}</div>`;
+    $('#checknow').onclick = async () => {
+      const r = await act(() => adminApi('/api/admin/integrations/mercadopago/check-now', { method: 'POST' }));
+      if (r) toast(r.skipped ? 'Mercado Pago no está configurado' : `Revisados: ${r.checked} · pagos encontrados: ${r.approved}${r.errors ? ` · errores: ${r.errors}` : ''}`);
+    };
     $('#f').onsubmit = async (e) => {
       e.preventDefault();
       if (await saveSettings(e.target)) CONFIG_TABS.mp();
@@ -1156,6 +1184,54 @@ const CONFIG_TABS = {
     $('#test').onclick = async () => {
       const r = await act(() => adminApi('/api/admin/integrations/mercadopago/test', { method: 'POST' }));
       if (r) toast(`Conectado a la cuenta ${r.account}${r.test ? ' (modo prueba)' : ''}`);
+    };
+  },
+
+  async wa() {
+    const [s, integ] = await Promise.all([adminApi('/api/admin/settings'), adminApi('/api/admin/integrations')]);
+    const w = integ.whatsapp;
+    $('#tab').innerHTML = `<form class="card" id="f">
+      <h2>WhatsApp ${w.enabled ? '<span class="badge ok">Envío automático activo</span>' : w.configured ? '<span class="badge warn">Configurado, envío desactivado</span>' : '<span class="badge warn">Sin configurar</span>'}</h2>
+      <p class="muted">Cuando se acredita la seña, el sistema le manda a la clienta la confirmación del turno por WhatsApp.
+        Usa la API oficial de WhatsApp (Meta), que exige una <b>plantilla de mensaje aprobada</b>. Ver los pasos abajo.</p>
+      <label class="check"><input type="checkbox" name="wa_enabled" ${s.wa_enabled === '1' ? 'checked' : ''} /> Enviar confirmación automática al recibir la seña</label>
+      <label>Indicaciones para la clienta (se incluyen en el mensaje)<textarea name="wa_info" rows="3">${esc(s.wa_info)}</textarea>
+        <small>En el mensaje automático los saltos de línea se reemplazan por " · " (limitación de WhatsApp).</small></label>
+      <div class="grid cols-2">
+        <label>Token de acceso<input name="wa_token" value="${esc(s.wa_token)}" autocomplete="off" placeholder="EAAG…" /></label>
+        <label>ID del número de teléfono (Phone number ID)<input name="wa_phone_number_id" value="${esc(s.wa_phone_number_id)}" autocomplete="off" /></label>
+        <label>Nombre de la plantilla<input name="wa_template_name" value="${esc(s.wa_template_name)}" /></label>
+        <label>Idioma de la plantilla<input name="wa_template_lang" value="${esc(s.wa_template_lang)}" placeholder="es_AR" /></label>
+      </div>
+      <label>Variables de la plantilla, en orden ({{1}}, {{2}}, …)<input name="wa_template_vars" value="${esc(s.wa_template_vars)}" />
+        <small>Disponibles: ${w.fields.join(', ')}</small></label>
+      <div class="row end"><button>Guardar</button></div>
+    </form>
+    <form class="card row" id="t"><input name="phone" class="grow" placeholder="Tu celular para probar (ej: 11 2345 6789)" required /><button class="secondary">Enviar mensaje de prueba</button></form>
+    <div class="card"><h2>Cómo configurarlo</h2>
+      <ol>
+        <li>Entrá a <a href="https://developers.facebook.com/apps" target="_blank">developers.facebook.com</a>, creá una app de tipo <b>Empresa</b> y agregale el producto <b>WhatsApp</b>.</li>
+        <li>En <b>WhatsApp → Configuración de la API</b> agregá y verificá el número del local (no puede estar usándose en la app de WhatsApp común; podés usar uno nuevo o migrarlo). Copiá el <b>Phone number ID</b>.</li>
+        <li>En <b>business.facebook.com → Configuración → Usuarios del sistema</b> creá un usuario de sistema, asignale la app y generá un <b>token permanente</b> con los permisos <code>whatsapp_business_messaging</code> y <code>whatsapp_business_management</code>.</li>
+        <li>En <b>WhatsApp Manager → Plantillas de mensajes</b> creá una plantilla de categoría <b>Utilidad</b>, idioma <b>Español (ARG)</b>, llamada <code>confirmacion_turno</code>, con este texto:
+          <pre style="white-space:pre-wrap;background:var(--bg);padding:0.8rem;border-radius:8px">¡Hola {{1}}! Tu turno de {{2}} está confirmado ✅
+📅 {{3}} a las {{4}}
+Para tener en cuenta: {{5}}
+¡Te esperamos!</pre>
+          Esperá a que Meta la apruebe (suele tardar minutos u horas).</li>
+        <li>Cargá acá el token, el Phone number ID y el nombre de la plantilla, mandate un mensaje de prueba y activá el envío automático.</li>
+      </ol>
+      <p class="muted">Mientras tanto, desde cada turno podés usar <b>Abrir WhatsApp con el mensaje</b> para mandarlo a mano con tu WhatsApp.</p>
+    </div>
+    <div class="card"><h2>Actividad reciente</h2>${logTable(w.log)}</div>`;
+    $('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      if (await saveSettings(e.target)) CONFIG_TABS.wa();
+    };
+    $('#t').onsubmit = async (e) => {
+      e.preventDefault();
+      const r = await act(() => adminApi('/api/admin/integrations/whatsapp/test', { method: 'POST', body: formData(e.target) }));
+      if (r) toast(`Mensaje de prueba enviado a +${r.to}`);
     };
   },
 

@@ -3,6 +3,7 @@ const mp = require('./mercadopago');
 const agenda = require('./agenda');
 const cash = require('./cash');
 const settings = require('../settings');
+const whatsapp = require('./whatsapp');
 const { log } = require('./log');
 const { conflict, round2 } = require('../util');
 
@@ -44,7 +45,11 @@ async function saleCheckout(saleId) {
  * Se llama desde el webhook y también cuando la clienta vuelve del checkout (por si el webhook tarda).
  */
 async function processPayment(paymentId) {
-  const payment = await mp.getPayment(paymentId);
+  return applyPayment(await mp.getPayment(paymentId));
+}
+
+// Registra un pago ya obtenido de Mercado Pago y, si está aprobado, lo aplica una sola vez.
+function applyPayment(payment) {
   const id = String(payment.id);
   const ref = String(payment.external_reference || '');
   const amount = round2(payment.transaction_amount || 0);
@@ -84,8 +89,71 @@ async function processPayment(paymentId) {
     db.run('UPDATE mp_payments SET applied = 1 WHERE payment_id = ?', id);
     return { status: 'approved', reference: ref, target };
   });
-  if (!result.alreadyApplied) log('mercadopago', 'info', `Pago ${id} aprobado ($${amount}) aplicado a ${ref}`);
+  if (!result.alreadyApplied) {
+    log('mercadopago', 'info', `Pago ${id} aprobado ($${amount}) aplicado a ${ref}`);
+    if (ref.startsWith('appt:')) whatsapp.notifyConfirmed(Number(ref.split(':')[1]));
+  }
   return result;
+}
+
+/**
+ * Busca en Mercado Pago los pagos de una reserva o venta pendiente y aplica los aprobados.
+ * Así el sistema no depende solo del webhook (que puede fallar o no estar configurado).
+ */
+async function checkReference(kind, id) {
+  const ref = `${kind}:${id}`;
+  const found = await mp.searchPayments(ref);
+  const table = kind === 'appt' ? 'appointments' : 'sales';
+  db.run(`UPDATE ${table} SET mp_checked_at = datetime('now') WHERE id = ?`, id);
+  let approved = 0;
+  for (const p of found) {
+    if (String(p.external_reference) !== ref) continue;
+    const res = applyPayment(p);
+    if (res.status === 'approved' && !res.alreadyApplied) approved++;
+  }
+  return { reference: ref, payments: found.length, approved };
+}
+
+let checking = false;
+
+// Revisa las reservas y ventas que esperan un pago de Mercado Pago. Se ejecuta cada minuto.
+async function reconcilePending({ force = false } = {}) {
+  if (checking || !mp.isConfigured()) return { skipped: true };
+  if (!force && settings.get('mp_auto_check') !== '1') return { skipped: true };
+  checking = true;
+  const summary = { checked: 0, approved: 0, errors: 0 };
+  try {
+    agenda.expirePending();
+    // Reservas esperando la seña, y las vencidas hace poco (por si el pago llegó justo al límite).
+    const appts = db.all(
+      `SELECT id FROM appointments
+       WHERE mp_preference_id IS NOT NULL AND deposit_paid < deposit_amount
+         AND (status = 'pending_payment' OR (status IN ('expired', 'confirmed') AND updated_at > datetime('now', '-6 hours')))
+         AND (mp_checked_at IS NULL OR mp_checked_at < datetime('now', '-50 seconds'))
+       ORDER BY id DESC LIMIT 40`
+    );
+    const sales = db.all(
+      `SELECT id FROM sales WHERE status = 'pending' AND mp_preference_id IS NOT NULL AND created_at > datetime('now', '-2 days')
+         AND (mp_checked_at IS NULL OR mp_checked_at < datetime('now', '-50 seconds'))
+       ORDER BY id DESC LIMIT 40`
+    );
+    for (const [kind, rows] of [['appt', appts], ['sale', sales]]) {
+      for (const r of rows) {
+        try {
+          const res = await checkReference(kind, r.id);
+          summary.checked++;
+          summary.approved += res.approved;
+        } catch (err) {
+          summary.errors++;
+          log('mercadopago', 'error', `Verificación automática de ${kind}:${r.id}: ${err.message}`);
+        }
+      }
+    }
+    if (summary.approved) log('mercadopago', 'info', `Verificación automática: ${summary.approved} pago(s) encontrados y aplicados`);
+    return summary;
+  } finally {
+    checking = false;
+  }
 }
 
 // Cancela un turno y, si se pide, devuelve la seña pagada por Mercado Pago.
@@ -117,4 +185,4 @@ async function cancelAppointment(appointmentId, { refund = false } = {}, userId 
   return agenda.setStatus(appt.id, 'cancelled');
 }
 
-module.exports = { depositCheckout, saleCheckout, processPayment, cancelAppointment };
+module.exports = { depositCheckout, saleCheckout, processPayment, applyPayment, checkReference, reconcilePending, cancelAppointment };
