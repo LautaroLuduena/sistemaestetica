@@ -190,6 +190,52 @@ CREATE TABLE IF NOT EXISTS tn_orders (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Ventas de la tienda online (Tienda Nube), con todos los datos para preparar el envío y controlar el pago.
+CREATE TABLE IF NOT EXISTS web_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tn_order_id TEXT NOT NULL UNIQUE,
+  number TEXT,
+  client_id INTEGER REFERENCES clients(id),
+  status TEXT,
+  payment_status TEXT,
+  shipping_status TEXT,
+  customer_name TEXT,
+  customer_email TEXT,
+  customer_phone TEXT,
+  customer_dni TEXT,
+  shipping_name TEXT,
+  shipping_phone TEXT,
+  shipping_address TEXT,
+  shipping_city TEXT,
+  shipping_province TEXT,
+  shipping_zipcode TEXT,
+  shipping_method TEXT,
+  shipping_pickup INTEGER NOT NULL DEFAULT 0,
+  shipping_tracking TEXT,
+  shipping_tracking_url TEXT,
+  gateway TEXT,
+  gateway_id TEXT,
+  payment_detail TEXT,
+  currency TEXT,
+  subtotal REAL,
+  discount REAL,
+  shipping_cost REAL,
+  total REAL,
+  customer_note TEXT,
+  owner_note TEXT,
+  items TEXT,
+  raw TEXT,
+  stock_status TEXT,
+  ordered_at TEXT,
+  paid_at TEXT,
+  shipped_at TEXT,
+  cancelled_at TEXT,
+  seen_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_orders_ordered ON web_orders(ordered_at);
+
 CREATE TABLE IF NOT EXISTS integration_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   integration TEXT NOT NULL,

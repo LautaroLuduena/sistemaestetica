@@ -10,6 +10,7 @@ const payments = require('../services/payments');
 const mp = require('../services/mercadopago');
 const tn = require('../services/tiendanube');
 const whatsapp = require('../services/whatsapp');
+const weborders = require('../services/weborders');
 const { recent } = require('../services/log');
 const { badRequest, notFound, conflict, money, int, requireText, isDate, isTime, nowInTz } = require('../util');
 
@@ -35,6 +36,7 @@ router.get('/dashboard', (req, res) => {
     cash: session ? cash.summary(session.id) : null,
     integrations: { mercadopago: mp.isConfigured(), tiendanube: tn.isConfigured() },
     tnSyncErrors: db.one(`SELECT COUNT(*) AS n FROM products WHERE tn_sync_status = 'error'`).n,
+    webOrders: weborders.stats(),
   });
 });
 
@@ -380,6 +382,19 @@ router.post('/sales/:id/pay', (req, res) => {
 });
 
 router.post('/sales/:id/cancel', (req, res) => res.json(cash.cancelSale(Number(req.params.id), uid(req))));
+
+// ---------- Ventas web (Tienda Nube) ----------
+
+router.get('/web-orders', (req, res) => {
+  const { q, payment, shipping, status, from, to } = req.query;
+  res.json({ orders: weborders.list({ q, payment, shipping, status, from, to }), stats: weborders.stats(), connected: tn.isConfigured(), lastSync: settings.get('tn_orders_last_sync') });
+});
+
+router.post('/web-orders/sync', async (req, res) => res.json(await weborders.sync({ days: Math.min(180, Number(req.body && req.body.days) || 30) })));
+
+router.get('/web-orders/:id', (req, res) => res.json(weborders.get(Number(req.params.id))));
+
+router.post('/web-orders/:id/verify-payment', async (req, res) => res.json(await weborders.verifyPayment(Number(req.params.id))));
 
 // ---------- Configuración ----------
 

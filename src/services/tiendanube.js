@@ -8,7 +8,7 @@ const { HttpError, round2 } = require('../util');
 
 const API = 'https://api.tiendanube.com/v1';
 const LANG = 'es';
-const WEBHOOK_EVENTS = ['order/created', 'order/cancelled', 'product/deleted'];
+const WEBHOOK_EVENTS = ['order/created', 'order/updated', 'order/paid', 'order/packed', 'order/fulfilled', 'order/cancelled', 'product/deleted'];
 
 function credentials() {
   const storeId = settings.get('tn_store_id');
@@ -79,6 +79,8 @@ async function registerWebhooks() {
     await call('/webhooks', { method: 'POST', body: { event, url } });
     created.push(event);
   }
+  // Las órdenes anteriores a este momento se importan sin tocar el stock.
+  if (!settings.get('tn_orders_since')) settings.set({ tn_orders_since: require('../util').sqlNow() });
   log('tiendanube', 'info', `Webhooks registrados: ${WEBHOOK_EVENTS.join(', ')}`);
   return { url, events: WEBHOOK_EVENTS, created };
 }
@@ -327,17 +329,10 @@ async function handleWebhook(payload) {
     log('tiendanube', 'warn', `Webhook de otra tienda ignorado (store_id ${payload.store_id})`);
     return { ignored: true };
   }
-  if (event === 'order/created' || event === 'order/paid') {
-    const order = await call(`/orders/${id}`);
-    const res = applyOrder(order, 'apply');
-    if (!res.skipped) log('tiendanube', 'info', `Orden #${order.number || id} descontada del stock`);
-    return res;
-  }
-  if (event === 'order/cancelled') {
-    const order = await call(`/orders/${id}`);
-    const res = applyOrder(order, 'revert');
-    if (!res.skipped) log('tiendanube', 'info', `Orden #${order.number || id} cancelada: stock repuesto`);
-    return res;
+  if (String(event || '').startsWith('order/')) {
+    // Se guarda la venta completa en "Ventas web" y se mueve el stock si corresponde.
+    const weborders = require('./weborders');
+    return { webOrderId: await weborders.handleEvent(event, id) };
   }
   if (event === 'product/deleted') {
     const n = db.run(`UPDATE products SET tn_product_id = NULL, tn_variant_id = NULL, tn_sync_status = NULL WHERE tn_product_id = ?`, String(id)).changes;
@@ -354,6 +349,8 @@ async function testConnection() {
 
 module.exports = {
   WEBHOOK_EVENTS,
+  api: call,
+  findLocalForItem,
   isConfigured,
   installUrl,
   exchangeCode,

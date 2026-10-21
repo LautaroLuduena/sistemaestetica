@@ -103,6 +103,17 @@ Sincronización:
 
 Los errores de sincronización se ven en el listado de stock y en *Configuración → Tienda Nube*.
 
+### Ventas web
+
+Cada venta de Tienda Nube aparece en la sección **Ventas web** con todo lo necesario para despacharla y controlarla:
+
+- **Cliente:** nombre, DNI, email, teléfono (con acceso directo a WhatsApp) y nota de la compra. La clienta también se agrega a *Clientas*.
+- **Envío:** dirección completa, código postal, ciudad, provincia, método de envío, costo y seguimiento, con un botón para copiar los datos (o "Retira en local").
+- **Productos:** detalle con SKU, cantidades, precios, descuentos, envío y total, y si cada producto está vinculado al stock.
+- **Pago:** estado en Tienda Nube, medio, cuotas, N° de operación y fecha. Si se cobró con Mercado Pago en la misma cuenta, el botón **Corroborar pago en Mercado Pago** consulta el pago real (estado, importe cobrado, neto recibido) y avisa si no coincide con el total.
+
+Las ventas llegan al instante por webhook (`order/created`, `order/paid`, `order/updated`, `order/packed`, `order/fulfilled`, `order/cancelled`) y, como respaldo, el sistema consulta Tienda Nube cada 5 minutos. La primera sincronización trae los últimos 30 días como historial **sin mover el stock**. Las ventas web no se suman a la caja del local (se cobran online).
+
 ## Estructura
 
 ```
@@ -117,6 +128,7 @@ src/
     whatsapp.js        confirmación de turnos por WhatsApp (API de Meta)
     mercadopago.js     cliente de la API de Mercado Pago
     tiendanube.js      cliente y sincronización con Tienda Nube
+    weborders.js       ventas web (órdenes de Tienda Nube)
     stock.js           movimientos de stock
     cash.js            caja, ventas y movimientos
   routes/              API pública, panel y webhooks

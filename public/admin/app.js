@@ -151,6 +151,7 @@ VIEWS.inicio = async () => {
       <div class="card stat"><div class="label">Efectivo esperado</div><div class="value">${c ? fmtMoney(c.expectedCash) : '-'}</div></div>
       <div class="card stat"><div class="label">Productos con poco stock</div><div class="value">${d.lowStock.length}</div></div>
     </div>
+    ${d.integrations.tiendanube && d.webOrders && d.webOrders.to_ship ? `<div class="alert info"><b>${d.webOrders.to_ship} venta(s) web pagada(s) para preparar y enviar.</b> <a href="#ventasweb?shipping=pending">Ver ventas web</a></div>` : ''}
     <div class="grid cols-2">
       <div class="card"><h2>Turnos de hoy</h2>${apptList(d.appointments) || '<p class="muted">No hay turnos para hoy.</p>'}</div>
       <div class="card"><h2>Stock bajo</h2>${
@@ -162,7 +163,15 @@ VIEWS.inicio = async () => {
       }</div>
     </div>`;
   bindApptClicks();
+  updateWebBadge(d.webOrders);
 };
+
+function updateWebBadge(stats) {
+  const el = $('#web-badge');
+  if (!el || !stats) return;
+  el.textContent = stats.unseen || '';
+  el.classList.toggle('hidden', !stats.unseen);
+}
 
 function apptList(list) {
   return list
@@ -816,6 +825,202 @@ function closeCashModal(s) {
       route();
     }
   };
+}
+
+// ---------- Ventas web (Tienda Nube) ----------
+
+const PAYMENT_STATUS = {
+  paid: ['Pagado', 'ok'],
+  pending: ['Pago pendiente', 'warn'],
+  authorized: ['Autorizado', 'warn'],
+  abandoned: ['Abandonado', 'gray'],
+  refunded: ['Reembolsado', 'danger'],
+  voided: ['Anulado', 'danger'],
+};
+const SHIPPING_STATUS = {
+  unpacked: ['Sin empaquetar', 'warn'],
+  unshipped: ['Sin enviar', 'warn'],
+  unfulfilled: ['Sin enviar', 'warn'],
+  packed: ['Empaquetado', 'info'],
+  fulfilled: ['Enviado', 'ok'],
+  shipped: ['Enviado', 'ok'],
+  delivered: ['Entregado', 'ok'],
+};
+const MP_STATUS = { approved: 'Aprobado', pending: 'Pendiente', in_process: 'En revisión', rejected: 'Rechazado', refunded: 'Devuelto', cancelled: 'Cancelado', charged_back: 'Contracargo' };
+const pick = (map, k) => {
+  const [label, cls] = map[k] || [k || '-', 'gray'];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+};
+const orderStatusBadge = (o) =>
+  o.status === 'cancelled' ? '<span class="badge gray">Cancelada</span>' : `${pick(PAYMENT_STATUS, o.payment_status)} ${o.shipping_pickup ? '<span class="badge info">Retira en local</span>' : pick(SHIPPING_STATUS, o.shipping_status)}`;
+const STOCK_LABEL = { applied: ['Stock descontado', 'ok'], reverted: ['Stock repuesto', 'info'], not_applied: ['Anterior a la conexión: stock sin mover', 'gray'] };
+
+app.web = { q: '', payment: '', shipping: '' };
+
+VIEWS.ventasweb = async () => {
+  const f = app.web;
+  if (app.query.get('shipping')) f.shipping = app.query.get('shipping');
+  const qs = new URLSearchParams({ q: f.q, payment: f.payment, shipping: f.shipping });
+  const d = await adminApi(`/api/admin/web-orders?${qs}`);
+  updateWebBadge(d.stats);
+  if (!d.connected && !d.orders.length) {
+    $('#main').innerHTML = `<div class="page-head"><h1>Ventas web</h1></div>
+      <div class="card"><p>Conectá Tienda Nube para ver acá las ventas de tu tienda online. <a href="#config?tab=tn">Ir a la configuración</a></p></div>`;
+    return;
+  }
+  const totalPaid = d.orders.filter((o) => o.payment_status === 'paid' && o.status !== 'cancelled').reduce((a, o) => a + (o.total || 0), 0);
+  $('#main').innerHTML = `
+    <div class="page-head"><h1>Ventas web</h1>
+      <div class="row"><small class="muted">${d.lastSync ? `Actualizado ${fmtDateTime(d.lastSync)}` : ''}</small><button class="secondary" id="sync">Actualizar ahora</button></div></div>
+    <div class="grid cols-3">
+      <div class="card stat"><div class="label">Para preparar / enviar</div><div class="value">${d.stats.to_ship || 0}</div></div>
+      <div class="card stat"><div class="label">Pago pendiente</div><div class="value">${d.stats.unpaid || 0}</div></div>
+      <div class="card stat"><div class="label">Cobrado (en este listado)</div><div class="value">${fmtMoney(totalPaid)}</div></div>
+    </div>
+    <div class="card row">
+      <input id="q" class="grow" placeholder="Buscar por cliente, email, teléfono, DNI o N° de orden" value="${esc(f.q)}" style="min-width:200px" />
+      <select id="payment" style="width:auto"><option value="">Todos los pagos</option>
+        ${Object.entries(PAYMENT_STATUS).map(([k, [l]]) => `<option value="${k}" ${f.payment === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select id="shipping" style="width:auto"><option value="">Todos los envíos</option>
+        <option value="pending" ${f.shipping === 'pending' ? 'selected' : ''}>Pagadas sin enviar</option>
+        <option value="fulfilled" ${f.shipping === 'fulfilled' ? 'selected' : ''}>Enviadas</option></select>
+    </div>
+    <div class="card">${
+      d.orders.length
+        ? `<div class="table-wrap"><table><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Productos</th><th class="num">Total</th><th>Estado</th></tr>
+          ${d.orders
+            .map(
+              (o) => `<tr data-wo="${o.id}" style="cursor:pointer;${o.seen_at ? '' : 'font-weight:600'}">
+              <td>#${esc(o.number || o.tn_order_id)} ${o.seen_at ? '' : '<span class="badge warn">Nueva</span>'}</td>
+              <td>${fmtDateTime(o.ordered_at)}</td>
+              <td>${esc(o.customer_name)}<br><small class="muted">${esc(o.shipping_city || (o.shipping_pickup ? 'Retiro' : ''))}${o.shipping_province ? `, ${esc(o.shipping_province)}` : ''}</small></td>
+              <td><small>${o.items.map((i) => `${i.quantity}x ${esc(i.name)}`).join('<br>')}</small></td>
+              <td class="num">${fmtMoney(o.total)}</td>
+              <td>${orderStatusBadge(o)}</td></tr>`
+            )
+            .join('')}</table></div>`
+        : '<p class="muted">No hay ventas web con estos filtros.</p>'
+    }</div>`;
+  const reload = () => VIEWS.ventasweb();
+  $('#sync').onclick = async () => {
+    $('#sync').disabled = true;
+    const r = await act(() => adminApi('/api/admin/web-orders/sync', { method: 'POST', body: {} }));
+    if (r) toast(r.skipped ? 'Ya se está actualizando' : `Listo: ${r.synced} orden(es) revisadas`);
+    reload();
+  };
+  $('#payment').onchange = (e) => ((f.payment = e.target.value), reload());
+  $('#shipping').onchange = (e) => {
+    f.shipping = e.target.value;
+    if (app.query.get('shipping')) location.hash = 'ventasweb';
+    else reload();
+  };
+  let t;
+  $('#q').oninput = (e) => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      f.q = e.target.value;
+      reload().then(() => {
+        const q = $('#q');
+        q.focus();
+        q.setSelectionRange(q.value.length, q.value.length);
+      });
+    }, 400);
+  };
+  $$('[data-wo]').forEach((tr) => (tr.onclick = () => openWebOrder(Number(tr.dataset.wo))));
+};
+
+async function openWebOrder(id) {
+  const o = await act(() => adminApi(`/api/admin/web-orders/${id}`));
+  if (!o) return;
+  const phone = (o.customer_phone || '').replace(/\D/g, '');
+  const wa = phone ? `https://wa.me/${phone.startsWith('54') ? phone : `549${phone.replace(/^0/, '')}`}` : null;
+  const shippingBlock = o.shipping_pickup
+    ? `<p><b>Retira en el local</b>${o.shipping_method ? ` · ${esc(o.shipping_method)}` : ''}</p>`
+    : `<pre id="ship-text" style="white-space:pre-wrap;background:var(--bg);padding:0.8rem;border-radius:8px;font-family:inherit;margin:0">${esc(
+        [
+          o.shipping_name,
+          o.shipping_address,
+          [o.shipping_zipcode ? `CP ${o.shipping_zipcode}` : '', o.shipping_city, o.shipping_province].filter(Boolean).join(', '),
+          o.shipping_phone ? `Tel: ${o.shipping_phone}` : '',
+          o.customer_dni ? `DNI: ${o.customer_dni}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      )}</pre>
+      <div class="row between" style="margin-top:0.4rem"><small class="muted">${esc(o.shipping_method || '')}</small><button class="secondary small" id="copy-ship">Copiar datos de envío</button></div>`;
+  const [stockLabel, stockCls] = STOCK_LABEL[o.stock_status] || ['-', 'gray'];
+  const m = modal(
+    `<div class="row between"><h2 style="margin:0">Venta web #${esc(o.number || o.tn_order_id)}</h2><div>${orderStatusBadge(o)}</div></div>
+    <p class="muted">${fmtDateTime(o.ordered_at)}${o.cancelled_at ? ` · cancelada ${fmtDateTime(o.cancelled_at)}` : ''}</p>
+    <div class="grid cols-2">
+      <div class="card"><h3>Cliente</h3>
+        <b>${esc(o.customer_name)}</b><br>
+        ${o.customer_dni ? `DNI: ${esc(o.customer_dni)}<br>` : ''}
+        ${o.customer_email ? `<a href="mailto:${esc(o.customer_email)}">${esc(o.customer_email)}</a><br>` : ''}
+        ${o.customer_phone ? `${esc(o.customer_phone)} ${wa ? `· <a href="${esc(wa)}" target="_blank">WhatsApp</a>` : ''}` : ''}
+        ${o.customer_note ? `<div class="alert warn" style="margin:0.6rem 0 0"><b>Nota del cliente:</b> ${esc(o.customer_note)}</div>` : ''}
+      </div>
+      <div class="card"><h3>Envío</h3>${shippingBlock}
+        ${o.shipping_tracking ? `<p style="margin-bottom:0">Seguimiento: ${o.shipping_tracking_url ? `<a href="${esc(o.shipping_tracking_url)}" target="_blank">${esc(o.shipping_tracking)}</a>` : esc(o.shipping_tracking)}</p>` : ''}
+        ${o.shipped_at ? `<small class="muted">Enviado ${fmtDateTime(o.shipped_at)}</small>` : ''}
+      </div>
+    </div>
+    <div class="card"><h3>Productos</h3>
+      <div class="table-wrap"><table><tr><th>Producto</th><th>SKU</th><th class="num">Cant.</th><th class="num">Precio</th><th class="num">Subtotal</th></tr>
+      ${o.items
+        .map(
+          (i) => `<tr><td>${esc(i.name)}${i.variant ? ` <small class="muted">(${esc(i.variant)})</small>` : ''}
+            ${i.product_id ? '' : '<br><span class="badge warn">No vinculado al stock del sistema</span>'}</td>
+            <td>${esc(i.sku || '')}</td><td class="num">${i.quantity}</td><td class="num">${fmtMoney(i.price)}</td><td class="num">${fmtMoney(i.subtotal)}</td></tr>`
+        )
+        .join('')}
+      </table></div>
+      <div style="max-width:320px;margin-left:auto">
+        <div class="summary-line"><span>Subtotal</span><span>${fmtMoney(o.subtotal)}</span></div>
+        ${o.discount ? `<div class="summary-line"><span>Descuentos</span><span>-${fmtMoney(o.discount)}</span></div>` : ''}
+        <div class="summary-line"><span>Envío</span><span>${o.shipping_cost ? fmtMoney(o.shipping_cost) : 'Gratis'}</span></div>
+        <div class="summary-line total"><span>Total</span><span>${fmtMoney(o.total)}</span></div>
+      </div>
+      <span class="badge ${stockCls}">${stockLabel}</span>
+    </div>
+    <div class="card"><h3>Pago</h3>
+      <div class="summary-line"><span>Estado en Tienda Nube</span><span>${pick(PAYMENT_STATUS, o.payment_status)}</span></div>
+      <div class="summary-line"><span>Medio</span><span>${esc(o.gateway || '-')}${o.payment_detail ? ` · ${esc(o.payment_detail)}` : ''}</span></div>
+      ${o.gateway_id ? `<div class="summary-line"><span>N° de operación</span><span>${esc(o.gateway_id)}</span></div>` : ''}
+      ${o.paid_at ? `<div class="summary-line"><span>Fecha de pago</span><span>${fmtDateTime(o.paid_at)}</span></div>` : ''}
+      <div id="mp-check"></div>
+      <div class="row end" style="margin-top:0.6rem"><button class="secondary small" id="verify">Corroborar pago en Mercado Pago</button></div>
+    </div>
+    ${o.owner_note ? `<div class="alert info"><b>Nota interna (Tienda Nube):</b> ${esc(o.owner_note)}</div>` : ''}
+    <div class="actions"><button class="secondary" data-close>Cerrar</button></div>`,
+    { wide: true }
+  );
+  if ($('#copy-ship', m)) $('#copy-ship', m).onclick = () => navigator.clipboard.writeText($('#ship-text', m).textContent).then(() => toast('Datos de envío copiados'));
+  $('#verify', m).onclick = async () => {
+    const r = await act(() => adminApi(`/api/admin/web-orders/${id}/verify-payment`, { method: 'POST' }));
+    if (!r) return;
+    $('#mp-check', m).innerHTML = !r.verifiable
+      ? `<div class="alert warn" style="margin-top:0.6rem">${esc(r.message)}</div>`
+      : `<div class="alert ${r.status === 'approved' && r.matches_total ? 'ok' : 'danger'}" style="margin-top:0.6rem">
+          <b>Mercado Pago: ${esc(MP_STATUS[r.status] || r.status)}</b> · operación ${esc(r.payment_id)}<br>
+          Importe cobrado: ${fmtMoney(r.amount)}${r.net_amount !== null ? ` (neto recibido ${fmtMoney(r.net_amount)})` : ''}
+          ${r.matches_total ? '' : `<br><b>Atención:</b> el importe no coincide con el total de la orden (${fmtMoney(o.total)}).`}
+          ${r.date_approved ? `<br>Aprobado: ${new Date(r.date_approved).toLocaleString('es-AR')}` : ''}
+          ${r.method ? `<br>Medio: ${esc(r.method)}` : ''}${r.payer ? ` · Pagador: ${esc(r.payer)}` : ''}</div>`;
+  };
+  if (app.view === 'ventasweb') {
+    const row = $(`[data-wo="${id}"]`);
+    if (row) {
+      row.style.fontWeight = '';
+      const b = $('.badge.warn', row.firstElementChild);
+      if (b) {
+        b.remove();
+        const badge = $('#web-badge');
+        const n = Math.max(0, (Number(badge.textContent) || 0) - 1);
+        updateWebBadge({ unseen: n });
+      }
+    }
+  }
 }
 
 // ---------- Stock ----------

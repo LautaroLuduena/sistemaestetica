@@ -44,6 +44,9 @@ const DEFAULTS = {
   tn_user_agent: '',
   tn_auto_sync: '1',
   tn_sync_price: '1',
+  // Órdenes de Tienda Nube: las creadas antes de esta fecha se importan sin tocar el stock.
+  tn_orders_since: '',
+  tn_orders_last_sync: '',
 };
 
 // Claves que nunca se devuelven completas al frontend.

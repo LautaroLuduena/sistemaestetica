@@ -16,7 +16,7 @@ let base;
 let cookie;
 
 // ---- Simulación de las APIs de Mercado Pago y Tienda Nube ----
-const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [], waMessages: [], waFail: null };
+const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [], waMessages: [], waFail: null, orderList: [] };
 
 function reply(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -51,6 +51,7 @@ http.fetch = async (url, opts = {}) => {
     remote.tnCalls.push({ method: opts.method || 'GET', path, body: opts.body ? JSON.parse(opts.body) : null });
     const order = path.match(/^\/orders\/(\d+)$/);
     if (order) return reply(200, remote.orders[order[1]]);
+    if (path === '/orders') return reply(200, u.searchParams.get('page') === '1' ? remote.orderList : []);
     if (path === '/products' && opts.method === 'POST') return reply(201, { id: 900, variants: [{ id: 901 }] });
     if (path === '/products' && (opts.method || 'GET') === 'GET') return reply(200, u.searchParams.get('page') === '1' ? remote.products : []);
     return reply(200, {});
@@ -406,4 +407,112 @@ test('WhatsApp: el error de envío queda registrado en el turno y se puede reint
   assert.equal(retry.status, 200);
   appt = (await call(`/api/admin/appointments/${id}`)).data;
   assert.equal(appt.wa_status, 'sent');
+});
+
+function fullOrder(id, overrides = {}) {
+  return {
+    id,
+    number: 2000 + id,
+    status: 'open',
+    payment_status: 'paid',
+    shipping_status: 'unpacked',
+    created_at: new Date().toISOString().replace('Z', '+0000'),
+    paid_at: new Date().toISOString().replace('Z', '+0000'),
+    contact_name: 'Lucía Fernández',
+    contact_email: 'lucia@test.com',
+    contact_phone: '+54 9 11 5555 1234',
+    contact_identification: '30123456',
+    shipping_address: { name: 'Lucía Fernández', address: 'Av. Siempreviva', number: '742', floor: '3B', locality: 'Palermo', city: 'CABA', province: 'Capital Federal', zipcode: '1425', phone: '1155551234' },
+    shipping_option: 'Correo Argentino - Envío a domicilio',
+    shipping_pickup_type: 'ship',
+    shipping_cost_customer: '3500.00',
+    gateway: 'mercadopago',
+    gateway_name: 'Mercado Pago',
+    gateway_id: '9001',
+    payment_details: { method: 'credit_card', credit_card_company: 'visa', installments: '3' },
+    subtotal: '18000.00',
+    discount: '0.00',
+    discount_coupon: '1000.00',
+    discount_gateway: '0.00',
+    total: '20500.00',
+    currency: 'ARS',
+    note: 'Dejar en portería',
+    products: [{ product_id: 900, variant_id: 901, sku: 'CR-1', name: 'Crema post bronceado', price: '9000.00', quantity: 2 }],
+    ...overrides,
+  };
+}
+
+test('Ventas web: una orden de Tienda Nube llega con cliente, envío, pago y productos', async () => {
+  const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
+  remote.orders['8001'] = fullOrder(8001);
+  const hook = await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 8001 } });
+  assert.equal(hook.status, 200);
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 2);
+
+  // El evento de pago/actualización de la misma orden no vuelve a descontar.
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/paid', id: 8001 } });
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 2);
+
+  const list = (await call('/api/admin/web-orders')).data;
+  const row = list.orders.find((o) => o.tn_order_id === '8001');
+  assert.ok(row);
+  assert.equal(list.stats.to_ship >= 1, true);
+  assert.equal(row.seen_at, null);
+
+  const o = (await call(`/api/admin/web-orders/${row.id}`)).data;
+  assert.equal(o.number, '10001');
+  assert.equal(o.customer_name, 'Lucía Fernández');
+  assert.equal(o.customer_dni, '30123456');
+  assert.equal(o.shipping_address, 'Av. Siempreviva 742, 3B - Palermo');
+  assert.equal(o.shipping_zipcode, '1425');
+  assert.equal(o.shipping_method, 'Correo Argentino - Envío a domicilio');
+  assert.equal(o.shipping_cost, 3500);
+  assert.equal(o.discount, 1000);
+  assert.equal(o.total, 20500);
+  assert.equal(o.gateway, 'Mercado Pago');
+  assert.equal(o.payment_detail, 'Tarjeta de crédito · VISA · 3 cuotas');
+  assert.equal(o.customer_note, 'Dejar en portería');
+  assert.equal(o.stock_status, 'applied');
+  assert.equal(o.items[0].product_id, cr.id);
+  assert.equal(o.items[0].subtotal, 18000);
+  assert.equal(o.raw, undefined);
+  assert.ok(db.one(`SELECT 1 FROM clients WHERE email = 'lucia@test.com'`));
+  assert.ok((await call(`/api/admin/web-orders/${row.id}`)).data.seen_at);
+
+  // Corroborar el pago contra Mercado Pago.
+  remote.payments['9001'] = { id: 9001, status: 'approved', transaction_amount: 20500, transaction_details: { net_received_amount: 19000 }, installments: 3, payment_method_id: 'visa' };
+  const v = (await call(`/api/admin/web-orders/${row.id}/verify-payment`, { method: 'POST' })).data;
+  assert.equal(v.verifiable, true);
+  assert.equal(v.status, 'approved');
+  assert.equal(v.matches_total, true);
+  assert.equal(v.net_amount, 19000);
+
+  // Cancelación: se repone el stock y queda registrado.
+  remote.orders['8001'] = fullOrder(8001, { status: 'cancelled', cancelled_at: new Date().toISOString() });
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/cancelled', id: 8001 } });
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock);
+  const after = (await call(`/api/admin/web-orders/${row.id}`)).data;
+  assert.equal(after.status, 'cancelled');
+  assert.equal(after.stock_status, 'reverted');
+});
+
+test('Ventas web: la sincronización importa órdenes viejas sin tocar el stock y descuenta las nuevas', async () => {
+  const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
+  settings.set({ tn_orders_since: '', tn_orders_last_sync: '' });
+  const weborders = require('../src/services/weborders');
+  // Orden de hace 5 días (anterior a la conexión) y otra que se crea después.
+  remote.orderList = [fullOrder(8002, { created_at: new Date(Date.now() - 5 * 86400e3).toISOString() })];
+  let r = await weborders.sync();
+  assert.equal(r.synced, 1);
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock);
+  assert.equal(db.one(`SELECT stock_status FROM web_orders WHERE tn_order_id = '8002'`).stock_status, 'not_applied');
+
+  await new Promise((done) => setTimeout(done, 1100));
+  remote.orderList = [fullOrder(8003, { created_at: new Date().toISOString(), products: [{ product_id: 900, variant_id: 901, sku: 'CR-1', name: 'Crema', price: '9000.00', quantity: 1 }] })];
+  r = await weborders.sync();
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 1);
+  // Si la misma orden llega después por webhook, no se descuenta dos veces.
+  remote.orders['8003'] = remote.orderList[0];
+  await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 8003 } });
+  assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 1);
 });
