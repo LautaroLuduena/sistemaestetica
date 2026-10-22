@@ -77,6 +77,7 @@ async function start() {
     app.user = me.user;
     $('#brand').textContent = me.business_name || 'Estética';
     $('#user-name').textContent = me.user.name || me.user.username;
+    $('#version').textContent = `Versión ${me.version}`;
   } catch {
     showLogin();
     return;

@@ -32,7 +32,9 @@ function createApp() {
   // Se guarda el body crudo para validar la firma de los webhooks de Tienda Nube.
   app.use(express.json({ limit: '1mb', verify: (req, res, buf) => (req.rawBody = buf) }));
 
-  app.get('/api/health', (req, res) => res.json({ ok: true }));
+  // Versión publicada (Railway informa el commit de cada deploy).
+  const version = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.SOURCE_COMMIT || '').slice(0, 7) || 'local';
+  app.get('/api/health', (req, res) => res.json({ ok: true, version }));
 
   app.post('/api/auth/login', (req, res) => {
     const { sid, user } = auth.login(req.body && req.body.username, req.body && req.body.password);
@@ -46,7 +48,7 @@ function createApp() {
   app.get('/api/auth/me', (req, res) => {
     const user = auth.sessionUser(req);
     if (!user) throw new HttpError(401, 'No hay sesión');
-    res.json({ user, business_name: settings.get('business_name') });
+    res.json({ user, business_name: settings.get('business_name'), version });
   });
 
   app.use('/api/public', require('./routes/public'));
