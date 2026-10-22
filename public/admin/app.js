@@ -262,17 +262,86 @@ VIEWS.agenda = async () => {
   bindApptClicks($('#main'));
 };
 
+/**
+ * Selector de día y horario que muestra solo lo disponible.
+ * source: { appointmentId } para reprogramar, o { serviceId } para un turno nuevo.
+ * onChange({ date, time }) se llama al elegir (time = null al cambiar de día).
+ */
+async function slotPicker(container, source, { date: initialDate = null, onChange = () => {} } = {}) {
+  const qs = new URLSearchParams(source).toString();
+  container.innerHTML = '<p class="muted">Buscando días disponibles…</p>';
+  let days;
+  try {
+    ({ days } = await adminApi(`/api/admin/availability?${qs}`));
+  } catch (err) {
+    container.innerHTML = `<div class="alert danger">${esc(err.message)}</div>`;
+    return;
+  }
+  if (!days.length) {
+    container.innerHTML = '<p class="muted">No hay días de atención configurados. Revisá Configuración → Horarios.</p>';
+    return;
+  }
+  container.innerHTML = `
+    <div class="days">${days
+      .map((d) => {
+        const dt = new Date(`${d.date}T12:00:00`);
+        return `<button type="button" class="day" data-date="${d.date}" ${d.free ? '' : 'disabled title="Sin horarios libres"'}>
+          <small>${dt.toLocaleDateString('es-AR', { weekday: 'short' })}</small><b>${dt.getDate()}</b>
+          <small>${dt.toLocaleDateString('es-AR', { month: 'short' })}</small>
+          <small class="free">${d.free ? `${d.free} libres` : 'Completo'}</small></button>`;
+      })
+      .join('')}</div>
+    <p class="muted picker-msg" style="margin:0.6rem 0 0">Elegí un día.</p>
+    <div class="slots picker-slots"></div>`;
+  const msg = $('.picker-msg', container);
+  const grid = $('.picker-slots', container);
+  const selectDay = async (date) => {
+    $$('.day', container).forEach((b) => b.classList.toggle('selected', b.dataset.date === date));
+    onChange({ date, time: null });
+    grid.innerHTML = '';
+    msg.textContent = 'Buscando horarios…';
+    msg.classList.remove('hidden');
+    const r = await act(() => adminApi(`/api/admin/availability?${qs}&date=${date}`));
+    if (!r) return;
+    if (!r.slots.length) {
+      msg.textContent = 'No quedan horarios libres ese día.';
+      return;
+    }
+    msg.textContent = `${fmtDate(date)}: elegí el horario.`;
+    grid.innerHTML = r.slots.map((t) => `<button type="button" class="slot" data-time="${t}">${t}</button>`).join('');
+    $$('.slot', grid).forEach(
+      (b) =>
+        (b.onclick = () => {
+          $$('.slot', grid).forEach((x) => x.classList.toggle('selected', x === b));
+          onChange({ date, time: b.dataset.time });
+        })
+    );
+  };
+  $$('.day', container).forEach((b) => (b.onclick = () => selectDay(b.dataset.date)));
+  const first = days.find((d) => d.date === initialDate && d.free) || days.find((d) => d.free);
+  if (first) {
+    selectDay(first.date);
+    const btn = $(`.day[data-date="${first.date}"]`, container);
+    if (btn) btn.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }
+}
+
 function newAppointmentModal(prefill = {}) {
   const services = app.services.filter((x) => x.active);
   const m = modal(`
     <h2>Nuevo turno</h2>
     <form id="f">
       <label>Servicio<select name="serviceId" required>${services.map((x) => `<option value="${x.id}">${esc(x.name)} (${x.duration_min} min - ${fmtMoney(x.price)})</option>`).join('')}</select></label>
-      <div class="grid cols-2">
-        <label>Fecha<input type="date" name="date" required value="${prefill.date || app.agenda.from}" /></label>
-        <label>Hora<input type="time" name="time" required step="300" /></label>
-      </div>
-      <div id="slot-hint" class="muted" style="margin:-0.4em 0 0.8em;font-size:0.85rem"></div>
+      <label style="margin-bottom:0.3em">Día y horario</label>
+      <div id="picker" style="margin-bottom:0.6rem"></div>
+      <div id="picked" class="alert info hidden" style="padding:0.5em 0.8em"></div>
+      <details style="margin-bottom:0.8rem"><summary class="muted">Cargar un horario a mano (sobreturno / fuera de horario)</summary>
+        <div class="grid cols-2" style="margin-top:0.5rem">
+          <label>Fecha<input type="date" name="mdate" /></label>
+          <label>Hora<input type="time" name="mtime" step="300" /></label>
+        </div>
+        <label class="check"><input type="checkbox" name="force" /> Usar este horario aunque se superponga</label>
+      </details>
       <div class="grid cols-2">
         <label>Nombre<input name="name" required /></label>
         <label>Teléfono<input name="phone" type="tel" /></label>
@@ -283,7 +352,6 @@ function newAppointmentModal(prefill = {}) {
         <label>Seña a cobrar<input name="depositAmount" type="number" step="0.01" min="0" /></label>
       </div>
       <label>Notas<textarea name="notes" rows="2"></textarea></label>
-      <label class="check"><input type="checkbox" name="force" /> Permitir fuera de horario / sobreturno</label>
       <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Guardar turno</button></div>
     </form>`);
   const f = $('#f', m);
@@ -294,26 +362,38 @@ function newAppointmentModal(prefill = {}) {
       f.depositAmount.value = svc.deposit_amount;
     }
   };
-  const hint = async () => {
-    if (!f.date.value || !f.serviceId.value) return;
-    try {
-      const { slots } = await adminApi(`/api/admin/appointments/slots?serviceId=${f.serviceId.value}&date=${f.date.value}`);
-      $('#slot-hint', m).innerHTML = slots.length
-        ? `Libres: ${slots.map((x) => `<button type="button" class="link" data-t="${x}">${x}</button>`).join(' ')}`
-        : 'No hay horarios libres ese día (podés forzar un sobreturno).';
-      $$('[data-t]', m).forEach((b) => (b.onclick = () => (f.time.value = b.dataset.t)));
-    } catch {
-      $('#slot-hint', m).textContent = '';
-    }
+  let pick = { date: null, time: null };
+  const showPick = () => {
+    $('#picked', m).classList.toggle('hidden', !pick.time);
+    if (pick.time) $('#picked', m).textContent = `Turno: ${fmtDate(pick.date)} a las ${pick.time} hs`;
   };
-  f.serviceId.onchange = () => (fillPrices(), hint());
-  f.date.onchange = hint;
+  const loadPicker = () => {
+    pick = { date: null, time: null };
+    showPick();
+    slotPicker($('#picker', m), { serviceId: f.serviceId.value }, {
+      date: pick.date || prefill.date || app.agenda.from,
+      onChange: (p) => ((pick = p), showPick()),
+    });
+  };
+  f.serviceId.onchange = () => (fillPrices(), loadPicker());
   fillPrices();
-  hint();
+  loadPicker();
   f.onsubmit = async (e) => {
     e.preventDefault();
     const body = formData(f);
-    body.force = f.force.checked;
+    const manual = f.mdate.value && f.mtime.value;
+    if (manual) {
+      body.date = f.mdate.value;
+      body.time = f.mtime.value;
+      body.force = f.force.checked;
+    } else if (pick.time) {
+      body.date = pick.date;
+      body.time = pick.time;
+    } else {
+      return toast('Elegí un día y un horario disponible', 'error');
+    }
+    delete body.mdate;
+    delete body.mtime;
     const appt = await act(() => adminApi('/api/admin/appointments', { method: 'POST', body }), 'Turno guardado');
     if (appt) {
       m.remove();
@@ -416,14 +496,29 @@ async function openAppointment(id) {
   });
   on('#move', () => {
     $('#extra', m).innerHTML = `<form id="mvf" class="card" style="margin-top:1rem"><h3>Reprogramar</h3>
-      <div class="grid cols-2"><label>Fecha<input type="date" name="date" value="${a.date}" required /></label>
-      <label>Hora<input type="time" name="time" value="${a.start_time}" required /></label></div>
-      <label class="check"><input type="checkbox" name="force" /> Permitir sobreturno / fuera de horario</label>
-      <div class="row end"><button>Guardar</button></div></form>`;
-    $('#mvf', m).onsubmit = async (e) => {
+      <p class="muted" style="margin-top:0">Turno actual: ${fmtDate(a.date)} a las ${a.start_time} hs. Se muestran solo los días y horarios libres.</p>
+      <div id="mv-picker"></div>
+      <div id="mv-picked" class="alert info hidden" style="margin-top:0.8rem;padding:0.5em 0.8em"></div>
+      <details style="margin-top:0.6rem"><summary class="muted">Cargar un horario a mano (sobreturno / fuera de horario)</summary>
+        <div class="grid cols-2" style="margin-top:0.5rem"><label>Fecha<input type="date" name="mdate" /></label>
+        <label>Hora<input type="time" name="mtime" step="300" /></label></div>
+        <label class="check"><input type="checkbox" name="force" /> Usar este horario aunque se superponga</label>
+      </details>
+      <div class="row end"><button id="mv-save" disabled>Guardar nuevo horario</button></div></form>`;
+    const form = $('#mvf', m);
+    let pick = { date: null, time: null };
+    const update = () => {
+      const manual = form.mdate.value && form.mtime.value;
+      $('#mv-save', m).disabled = !(pick.time || manual);
+      $('#mv-picked', m).classList.toggle('hidden', !pick.time || manual);
+      if (pick.time) $('#mv-picked', m).textContent = `Nuevo horario: ${fmtDate(pick.date)} a las ${pick.time} hs`;
+    };
+    form.oninput = update;
+    slotPicker($('#mv-picker', m), { appointmentId: id }, { date: a.date, onChange: (p) => ((pick = p), update()) });
+    form.onsubmit = async (e) => {
       e.preventDefault();
-      const body = formData(e.target);
-      body.force = e.target.force.checked;
+      const manual = form.mdate.value && form.mtime.value;
+      const body = manual ? { date: form.mdate.value, time: form.mtime.value, force: form.force.checked } : { date: pick.date, time: pick.time };
       const r = await act(() => adminApi(`/api/admin/appointments/${id}/reschedule`, { method: 'POST', body }), 'Turno reprogramado');
       if (r) refresh();
     };

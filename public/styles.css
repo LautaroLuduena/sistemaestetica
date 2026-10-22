@@ -197,7 +197,10 @@ tr:last-child td { border-bottom: 0; }
 }
 .day small { color: inherit; opacity: 0.75; font-size: 0.75rem; text-transform: capitalize; }
 .day b { font-size: 1.25rem; }
-.day.selected, .day:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+.day.selected, .day:hover:not(:disabled) { background: var(--primary); color: #fff; border-color: var(--primary); }
+.day:disabled { opacity: 0.4; cursor: not-allowed; background: #f3eee9; }
+.day .free { font-size: 0.68rem; text-transform: none; margin-top: 2px; }
+.modal .days { max-width: 100%; }
 .slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 0.5rem; margin-top: 1rem; }
 .slot { background: #fff; color: var(--text); border-color: var(--border); }
 .slot.selected, .slot:hover { background: var(--primary); color: #fff; border-color: var(--primary); }

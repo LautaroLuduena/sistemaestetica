@@ -516,3 +516,28 @@ test('Ventas web: la sincronización importa órdenes viejas sin tocar el stock 
   await call('/api/webhooks/tiendanube', { method: 'POST', body: { store_id: 555, event: 'order/created', id: 8003 } });
   assert.equal(db.one('SELECT stock FROM products WHERE id = ?', cr.id).stock, cr.stock - 1);
 });
+
+test('reprogramar: solo se ofrecen horarios libres y el propio turno no se bloquea a sí mismo', async () => {
+  const date = addDays(day(), 6);
+  const a = (await call('/api/admin/appointments', { method: 'POST', body: { serviceId: 1, date, time: '10:00', name: 'Gina', phone: '1170000001' } })).data;
+  await call('/api/admin/appointments', { method: 'POST', body: { serviceId: 1, date, time: '10:30', name: 'Hilda', phone: '1170000002' } });
+
+  const slots = (await call(`/api/admin/availability?appointmentId=${a.id}&date=${date}`)).data.slots;
+  assert.deepEqual(slots, ['10:00', '11:00', '11:30']);
+
+  // Para un turno nuevo del mismo servicio, 10:00 y 10:30 están ocupados.
+  const fresh = (await call(`/api/admin/availability?serviceId=1&date=${date}`)).data.slots;
+  assert.deepEqual(fresh, ['11:00', '11:30']);
+
+  const days = (await call(`/api/admin/availability?appointmentId=${a.id}`)).data.days;
+  assert.equal(days.find((d) => d.date === date).free, 3);
+  assert.ok(days.length > 30, 'el panel ve más días que la ventana pública');
+
+  const overlap = await call(`/api/admin/appointments/${a.id}/reschedule`, { method: 'POST', body: { date, time: '10:30' } });
+  assert.equal(overlap.status, 409);
+  assert.match(overlap.data.error, /superpone/);
+  const ok = await call(`/api/admin/appointments/${a.id}/reschedule`, { method: 'POST', body: { date, time: '11:30' } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.start_time, '11:30');
+  assert.equal(ok.data.end_time, '12:00');
+});

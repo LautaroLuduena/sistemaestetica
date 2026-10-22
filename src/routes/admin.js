@@ -128,8 +128,23 @@ router.get('/appointments', (req, res) => {
   res.json(agenda.list({ from: req.query.from, to: req.query.to, status: req.query.status, q: req.query.q }));
 });
 
+// Disponibilidad para el panel. Con appointmentId (reprogramar) se usa el servicio y la duración de ese turno
+// y el turno no ocupa su propio lugar. Sin date devuelve los días; con date, los horarios libres de ese día.
+router.get('/availability', (req, res) => {
+  let serviceId = Number(req.query.serviceId);
+  let opts = {};
+  if (req.query.appointmentId) {
+    const appt = agenda.getAppointment(Number(req.query.appointmentId));
+    serviceId = appt.service_id;
+    opts = { excludeId: appt.id, duration: agenda.apptDuration(appt) };
+  }
+  if (!serviceId) throw badRequest('Falta el servicio');
+  if (req.query.date) return res.json({ slots: agenda.availableSlots(String(req.query.date), serviceId, { admin: true, ...opts }) });
+  res.json({ days: agenda.adminDays(serviceId, opts) });
+});
+
 router.get('/appointments/slots', (req, res) => {
-  res.json({ slots: agenda.availableSlots(String(req.query.date || ''), Number(req.query.serviceId)) });
+  res.json({ slots: agenda.availableSlots(String(req.query.date || ''), Number(req.query.serviceId), { admin: true }) });
 });
 
 router.post('/appointments', (req, res) => {

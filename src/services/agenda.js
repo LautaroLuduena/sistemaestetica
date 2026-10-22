@@ -59,25 +59,35 @@ function getService(serviceId, { activeOnly = false } = {}) {
   return service;
 }
 
-// Horarios disponibles para un servicio en una fecha (vista pública).
-function availableSlots(date, serviceId) {
+// Días hacia adelante que ve el panel al elegir horarios (puede ser más que la ventana de reservas online).
+const ADMIN_WINDOW_DAYS = 90;
+
+/**
+ * Horarios libres para un servicio en una fecha.
+ *  - Vista pública: respeta la ventana de reservas y la anticipación mínima.
+ *  - admin: true  → panel del local: hasta 90 días, cualquier horario que no haya pasado.
+ *  - excludeId    → turno que se está reprogramando (no ocupa su propio lugar).
+ *  - duration     → duración a usar (por defecto, la del servicio).
+ */
+function availableSlots(date, serviceId, { admin = false, excludeId = null, duration = null } = {}) {
   if (!isDate(date)) throw badRequest('Fecha inválida');
-  const service = getService(serviceId, { activeOnly: true });
-  const tz = settings.get('timezone');
-  const now = nowInTz(tz);
-  const lastDate = addDays(now.date, settings.getInt('booking_window_days'));
-  if (date < now.date || date > lastDate) return [];
+  const service = getService(serviceId, { activeOnly: !admin });
+  const length = duration || service.duration_min;
+  const now = nowInTz(settings.get('timezone'));
+  const windowDays = admin ? Math.max(ADMIN_WINDOW_DAYS, settings.getInt('booking_window_days')) : settings.getInt('booking_window_days');
+  if (date < now.date || date > addDays(now.date, windowDays)) return [];
 
   const step = Math.max(5, settings.getInt('slot_interval_min'));
   const capacity = Math.max(1, settings.getInt('capacity'));
-  const minStart = date === now.date ? now.minutes + settings.getInt('min_advance_min') : -1;
-  const busy = busyIntervals(date);
+  const advance = admin ? 0 : settings.getInt('min_advance_min');
+  const minStart = date === now.date ? now.minutes + advance : -1;
+  const busy = busyIntervals(date, excludeId);
   const slots = [];
 
   for (const range of hoursFor(date)) {
-    for (let start = range.start; start + service.duration_min <= range.end; start += step) {
+    for (let start = range.start; start + length <= range.end; start += step) {
       if (start < minStart) continue;
-      if (maxOverlap(busy, start, start + service.duration_min) < capacity) {
+      if (maxOverlap(busy, start, start + length) < capacity) {
         slots.push(fromMinutes(start));
       }
     }
@@ -95,6 +105,22 @@ function openDays() {
   }
   return days;
 }
+
+// Para el panel: días de atención con la cantidad de horarios libres de cada uno.
+function adminDays(serviceId, { excludeId = null, duration = null } = {}) {
+  const now = nowInTz(settings.get('timezone'));
+  const windowDays = Math.max(ADMIN_WINDOW_DAYS, settings.getInt('booking_window_days'));
+  const days = [];
+  for (let i = 0; i <= windowDays; i++) {
+    const date = addDays(now.date, i);
+    if (!hoursFor(date).length) continue;
+    days.push({ date, free: availableSlots(date, serviceId, { admin: true, excludeId, duration }).length });
+  }
+  return days;
+}
+
+// Duración real de un turno (puede diferir de la del servicio si el servicio se modificó después).
+const apptDuration = (appt) => toMinutes(appt.end_time) - toMinutes(appt.start_time);
 
 function hasRoom(date, startTime, endTime, excludeId = null) {
   const capacity = Math.max(1, settings.getInt('capacity'));
@@ -231,10 +257,10 @@ function reschedule(id, { date, time, force }) {
   return db.tx(() => {
     const appt = getAppointment(id);
     if (['cancelled', 'completed'].includes(appt.status)) throw conflict('No se puede reprogramar este turno');
-    const endTime = fromMinutes(toMinutes(time) + appt.duration_min);
+    const endTime = fromMinutes(toMinutes(time) + apptDuration(appt));
     if (!force) {
       if (!withinHours(date, time, endTime)) throw conflict('El horario está fuera del horario de atención');
-      if (!hasRoom(date, time, endTime, appt.id)) throw conflict('No hay lugar en ese horario');
+      if (!hasRoom(date, time, endTime, appt.id)) throw conflict('Ese horario se superpone con otro turno');
     }
     const revive = appt.status === 'expired' && appt.deposit_paid > 0;
     db.run(
@@ -346,6 +372,8 @@ module.exports = {
   maxOverlap,
   availableSlots,
   openDays,
+  adminDays,
+  apptDuration,
   hasRoom,
   upsertClient,
   getAppointment,
