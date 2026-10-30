@@ -11,6 +11,7 @@ const mp = require('../services/mercadopago');
 const tn = require('../services/tiendanube');
 const whatsapp = require('../services/whatsapp');
 const weborders = require('../services/weborders');
+const inventory = require('../services/inventory');
 const { recent } = require('../services/log');
 const { badRequest, notFound, conflict, money, int, requireText, isDate, isTime, nowInTz } = require('../util');
 
@@ -32,10 +33,13 @@ router.get('/dashboard', (req, res) => {
       `SELECT a.id, a.date, a.start_time, a.alert, c.name AS client_name FROM appointments a JOIN clients c ON c.id = a.client_id
        WHERE a.alert IS NOT NULL ORDER BY a.date DESC LIMIT 20`
     ),
-    lowStock: db.all('SELECT id, name, sku, stock, min_stock FROM products WHERE active = 1 AND stock <= min_stock ORDER BY stock, name LIMIT 50'),
+    lowStock: db.all(
+      `SELECT p.id, p.name, p.sku, p.stock, p.min_stock FROM products p LEFT JOIN articles a ON a.id = p.article_id
+       WHERE p.active = 1 AND IFNULL(a.active, 1) = 1 AND p.stock <= p.min_stock ORDER BY p.stock, p.name LIMIT 50`
+    ),
     cash: session ? cash.summary(session.id) : null,
     integrations: { mercadopago: mp.isConfigured(), tiendanube: tn.isConfigured() },
-    tnSyncErrors: db.one(`SELECT COUNT(*) AS n FROM products WHERE tn_sync_status = 'error'`).n,
+    tnSyncErrors: db.one(`SELECT COUNT(*) AS n FROM articles WHERE tn_sync_status = 'error'`).n,
     webOrders: weborders.stats(),
   });
 });
@@ -238,74 +242,50 @@ router.put('/clients/:id', (req, res) => {
   res.json(db.one('SELECT * FROM clients WHERE id = ?', Number(req.params.id)));
 });
 
-// ---------- Productos y stock ----------
+// ---------- Inventario ----------
 
-function productInput(body) {
-  return {
-    sku: String(body.sku || '').trim() || null,
-    name: requireText(body.name, 'el nombre'),
-    description: String(body.description || '').trim() || null,
-    price: money(body.price ?? 0, 'precio'),
-    min_stock: Math.max(0, int(body.min_stock ?? 0, 'stock mínimo')),
-    active: body.active === false || body.active === 0 ? 0 : 1,
-    publish_online: body.publish_online === false || body.publish_online === 0 ? 0 : 1,
-  };
-}
+// Categorías y subcategorías
+router.get('/categories', (req, res) => res.json(inventory.categoryTree()));
 
-function uniqueSku(sku, id = null) {
-  if (sku && db.one('SELECT 1 FROM products WHERE sku = ? AND id IS NOT ?', sku, id)) throw conflict('Ya existe un producto con ese SKU');
-}
+router.post('/categories', (req, res) => res.status(201).json(inventory.saveCategory(req.body || {})));
 
-router.get('/products', (req, res) => {
-  const q = `%${String(req.query.q || '').trim()}%`;
-  res.json(db.all(`SELECT * FROM products WHERE name LIKE ? OR IFNULL(sku, '') LIKE ? ORDER BY active DESC, name`, q, q));
+router.put('/categories/:id', (req, res) => {
+  const c = inventory.saveCategory(req.body || {}, Number(req.params.id));
+  tn.updateCategory(c.id);
+  res.json(c);
 });
 
-router.post('/products', (req, res) => {
-  const p = productInput(req.body || {});
-  uniqueSku(p.sku);
-  const initial = req.body.stock ? int(req.body.stock, 'stock inicial') : 0;
-  if (initial < 0) throw badRequest('El stock inicial no puede ser negativo');
-  const id = db.tx(() => {
-    const r = db.run(
-      'INSERT INTO products (sku, name, description, price, min_stock, active, publish_online) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      p.sku, p.name, p.description, p.price, p.min_stock, p.active, p.publish_online
-    );
-    const newId = Number(r.lastInsertRowid);
-    if (initial) stock.change(newId, { setTo: initial, type: 'initial', reason: 'Alta de producto', userId: uid(req) });
-    return newId;
-  });
-  tn.schedulePush(id);
-  res.status(201).json(stock.getProduct(id));
+router.delete('/categories/:id', (req, res) => res.json(inventory.deleteCategory(Number(req.params.id))));
+
+// Artículos
+router.get('/articles', (req, res) => {
+  const { q, categoryId, status } = req.query;
+  res.json({ articles: inventory.listArticles({ q, categoryId, status }), tnConnected: tn.isConfigured() });
 });
 
-router.put('/products/:id', (req, res) => {
-  const id = Number(req.params.id);
-  stock.getProduct(id);
-  const p = productInput(req.body || {});
-  uniqueSku(p.sku, id);
-  db.run(
-    `UPDATE products SET sku = ?, name = ?, description = ?, price = ?, min_stock = ?, active = ?, publish_online = ?, updated_at = datetime('now') WHERE id = ?`,
-    p.sku, p.name, p.description, p.price, p.min_stock, p.active, p.publish_online, id
-  );
-  tn.schedulePush(id);
-  res.json(stock.getProduct(id));
+router.get('/articles/:id', (req, res) => res.json(inventory.getArticle(Number(req.params.id))));
+
+router.post('/articles', (req, res) => res.status(201).json(inventory.saveArticle(req.body, { userId: uid(req) })));
+
+router.put('/articles/:id', (req, res) => res.json(inventory.saveArticle(req.body, { id: Number(req.params.id), userId: uid(req) })));
+
+router.delete('/articles/:id', (req, res) => res.json(inventory.deleteArticle(Number(req.params.id))));
+
+router.post('/articles/:id/sync', async (req, res) => {
+  await tn.pushArticle(Number(req.params.id));
+  res.json(inventory.getArticle(Number(req.params.id)));
 });
 
-router.delete('/products/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const p = stock.getProduct(id);
-  const used = db.one('SELECT 1 FROM sale_items WHERE product_id = ?', id);
-  if (used || p.tn_product_id) {
-    db.run(`UPDATE products SET active = 0, updated_at = datetime('now') WHERE id = ?`, id);
-    tn.schedulePush(id); // se despublica en la web
-    return res.json({ deactivated: true });
-  }
-  db.run('DELETE FROM products WHERE id = ?', id);
-  res.json({ deleted: true });
+// Descuento por porcentaje (todo, una categoría o artículos elegidos). 0 = quitar descuento.
+router.post('/articles/discount', (req, res) => {
+  const { percent, categoryId, articleIds } = req.body || {};
+  res.json(inventory.applyDiscount({ percent, categoryId: categoryId || null, articleIds }));
 });
 
-// Ajuste de stock: mode "add" (entrada), "remove" (salida/rotura) o "set" (conteo físico).
+// Variantes vendibles (para la caja)
+router.get('/products', (req, res) => res.json(inventory.sellableProducts(String(req.query.q || '').trim())));
+
+// Ajuste de stock de una variante: mode "add" (entrada), "remove" (salida/rotura) o "set" (conteo físico).
 router.post('/products/:id/adjust', (req, res) => {
   const { mode, quantity, reason } = req.body || {};
   const qty = int(quantity, 'cantidad');
@@ -320,12 +300,13 @@ router.post('/products/:id/adjust', (req, res) => {
 });
 
 router.get('/stock-movements', (req, res) => {
-  res.json(stock.movements({ productId: req.query.productId ? Number(req.query.productId) : null, limit: Math.min(1000, Number(req.query.limit) || 200) }));
-});
-
-router.post('/products/:id/sync', async (req, res) => {
-  await tn.pushProduct(Number(req.params.id));
-  res.json(stock.getProduct(Number(req.params.id)));
+  res.json(
+    stock.movements({
+      productId: req.query.productId ? Number(req.query.productId) : null,
+      articleId: req.query.articleId ? Number(req.query.articleId) : null,
+      limit: Math.min(1000, Number(req.query.limit) || 200),
+    })
+  );
 });
 
 // ---------- Caja ----------
@@ -438,8 +419,8 @@ router.get('/integrations', (req, res) => {
       configured: tn.isConfigured(),
       storeId: settings.get('tn_store_id'),
       queue: tn.pendingQueue(),
-      linked: db.one('SELECT COUNT(*) AS n FROM products WHERE tn_product_id IS NOT NULL').n,
-      errors: db.all(`SELECT id, name, tn_sync_error FROM products WHERE tn_sync_status = 'error' LIMIT 50`),
+      linked: db.one('SELECT COUNT(*) AS n FROM articles WHERE tn_product_id IS NOT NULL').n,
+      errors: db.all(`SELECT id, name, tn_sync_error FROM articles WHERE tn_sync_status = 'error' LIMIT 50`),
       log: recent('tiendanube', 30),
     },
   });

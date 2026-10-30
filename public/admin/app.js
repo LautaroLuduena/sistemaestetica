@@ -628,9 +628,15 @@ function renderPos(products, services) {
 
   const renderProducts = (q = '') => {
     const ql = q.toLowerCase();
-    const list = products.filter((p) => p.active && (!ql || p.name.toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql)));
+    const list = products.filter((p) => !ql || p.name.toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql));
     $('#pgrid').innerHTML = list.length
-      ? list.map((p) => `<button class="product-tile" data-prod="${p.id}" ${p.stock <= 0 ? 'style="opacity:.55"' : ''}><b>${esc(p.name)}</b><small>${fmtMoney(p.price)} · stock ${p.stock}</small></button>`).join('')
+      ? list
+          .map(
+            (p) => `<button class="product-tile" data-prod="${p.id}" ${p.stock <= 0 ? 'style="opacity:.55"' : ''}>
+              ${p.thumb ? `<img src="${esc(p.thumb)}" alt="" class="thumb" />` : ''}<b>${esc(p.name)}</b>
+              <small>${p.effective_price < p.price ? `<s>${fmtMoney(p.price)}</s> <b style="color:var(--danger)">${fmtMoney(p.effective_price)}</b>` : fmtMoney(p.price)} · stock ${p.stock}</small></button>`
+          )
+          .join('')
       : '<p class="muted">Sin productos.</p>';
     $$('[data-prod]').forEach((b) => (b.onclick = () => addProduct(products.find((p) => p.id === Number(b.dataset.prod)))));
     return list;
@@ -638,7 +644,7 @@ function renderPos(products, services) {
   const addProduct = (p) => {
     const line = app.cart.find((l) => l.productId === p.id);
     if (line) line.quantity++;
-    else app.cart.push({ productId: p.id, description: p.name, quantity: 1, unitPrice: p.price, stock: p.stock });
+    else app.cart.push({ productId: p.id, description: p.name, quantity: 1, unitPrice: p.effective_price, stock: p.stock });
     renderCart();
   };
   renderProducts();
@@ -1123,70 +1129,142 @@ async function openWebOrder(id) {
   }
 }
 
-// ---------- Stock ----------
+// ---------- Inventario ----------
+
+app.inv = { q: '', categoryId: '', status: '' };
+const MAX_PHOTOS = 3;
 
 VIEWS.stock = async () => {
-  const tab = app.query.get('tab') || 'productos';
+  location.hash = 'inventario';
+};
+
+VIEWS.inventario = async () => {
+  const tab = app.query.get('tab') || 'articulos';
   $('#main').innerHTML = `
-    <div class="page-head"><h1>Stock</h1><button id="new">+ Nuevo producto</button></div>
-    <div class="tabs">${[['productos', 'Productos'], ['movimientos', 'Movimientos']]
+    <div class="page-head"><h1>Inventario</h1>
+      <div class="row"><button class="secondary" id="discount">% Descuentos</button><button id="new">+ Nuevo artículo</button></div></div>
+    <div class="tabs">${[['articulos', 'Artículos'], ['categorias', 'Categorías'], ['movimientos', 'Movimientos de stock']]
       .map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`)
       .join('')}</div>
-    <div id="tab"></div>`;
-  $$('[data-tab]').forEach((b) => (b.onclick = () => (location.hash = `stock?tab=${b.dataset.tab}`)));
-  $('#new').onclick = () => productModal();
+    <div id="tab"><p class="muted">Cargando…</p></div>`;
+  $$('[data-tab]').forEach((b) => (b.onclick = () => (location.hash = `inventario?tab=${b.dataset.tab}`)));
+  $('#new').onclick = () => articleModal();
+  $('#discount').onclick = () => discountModal();
+  if (tab === 'categorias') return renderCategories();
   if (tab === 'movimientos') {
     const list = await adminApi('/api/admin/stock-movements?limit=500');
     $('#tab').innerHTML = `<div class="card">${stockMovementsTable(list, true)}</div>`;
     return;
   }
-  $('#tab').innerHTML = `<div class="card"><input id="q" placeholder="Buscar por nombre o SKU" value="${esc(app.stockQ || '')}" style="margin-bottom:0.8rem" /><div id="plist"></div></div>`;
-  const load = async () => {
-    const list = await adminApi(`/api/admin/products?q=${encodeURIComponent(app.stockQ || '')}`);
-    const syncBadge = (p) =>
-      !p.tn_product_id
-        ? p.tn_sync_status === 'error'
-          ? `<span class="badge danger" title="${esc(p.tn_sync_error || '')}">Error</span>`
-          : '<span class="badge gray">No vinculado</span>'
-        : p.tn_sync_status === 'error'
-          ? `<span class="badge danger" title="${esc(p.tn_sync_error || '')}">Error</span>`
-          : '<span class="badge ok">Sincronizado</span>';
-    $('#plist').innerHTML = list.length
-      ? `<div class="table-wrap"><table><tr><th>SKU</th><th>Producto</th><th class="num">Precio</th><th class="num">Stock</th><th>Tienda Nube</th><th></th></tr>
+  return renderArticles();
+};
+
+const categoryOptions = (tree, selected = '', { all = false } = {}) =>
+  (all ? '<option value="">Todas las categorías</option>' : '') +
+  tree
+    .map(
+      (c) =>
+        `<option value="${c.id}" ${String(selected) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>` +
+        c.children.map((s) => `<option value="${s.id}" ${String(selected) === String(s.id) ? 'selected' : ''}>&nbsp;&nbsp;› ${esc(s.name)}</option>`).join('')
+    )
+    .join('');
+
+function priceCell(a) {
+  const range = (min, max) => (min === max ? fmtMoney(min) : `${fmtMoney(min)} – ${fmtMoney(max)}`);
+  if (!a.on_promo) return range(a.price_min, a.price_max);
+  if (a.variants.length === 1) {
+    const v = a.variants[0];
+    return `<s class="muted">${fmtMoney(v.price)}</s><br><b style="color:var(--danger)">${fmtMoney(v.effective_price)}</b>`;
+  }
+  const n = a.variants.filter((v) => v.effective_price < v.price).length;
+  return `${range(a.price_min, a.price_max)}<br><span class="badge danger">${n === a.variants.length ? 'En promoción' : `${n} en promoción`}</span>`;
+}
+
+function onlineBadge(a, connected) {
+  if (!a.publish_online) return '<span class="badge gray">No se publica</span>';
+  if (!connected && !a.tn_product_id) return '<span class="badge gray" title="Conectá Tienda Nube en Configuración">Tienda sin conectar</span>';
+  if (a.tn_sync_status === 'error') return `<span class="badge danger" title="${esc(a.tn_sync_error || '')}">Error al publicar</span>`;
+  if (a.tn_product_id) return '<span class="badge ok">Publicado</span>';
+  return '<span class="badge gray">Pendiente</span>';
+}
+
+async function renderArticles() {
+  const f = app.inv;
+  const [tree, { articles: list, tnConnected }] = await Promise.all([
+    adminApi('/api/admin/categories'),
+    adminApi(`/api/admin/articles?${new URLSearchParams({ q: f.q, categoryId: f.categoryId, status: f.status })}`),
+  ]);
+  app.categories = tree;
+  app.tnConnected = tnConnected;
+  $('#tab').innerHTML = `
+    <div class="card row">
+      <input id="q" class="grow" placeholder="Buscar por nombre, marca o SKU" value="${esc(f.q)}" style="min-width:200px" />
+      <select id="cat" style="width:auto">${categoryOptions(tree, f.categoryId, { all: true })}</select>
+      <select id="st" style="width:auto">
+        ${[['', 'Activos'], ['low', 'Stock bajo'], ['promo', 'En promoción'], ['inactive', 'Inactivos'], ['all', 'Todos']]
+          .map(([k, l]) => `<option value="${k}" ${f.status === k ? 'selected' : ''}>${l}</option>`)
+          .join('')}
+      </select>
+    </div>
+    <div class="card">${
+      list.length
+        ? `<div class="table-wrap"><table><tr><th></th><th>Artículo</th><th>Categoría</th><th class="num">Precio</th><th class="num">Stock</th><th>Tienda online</th><th></th></tr>
         ${list
           .map(
-            (p) => `<tr style="${p.active ? '' : 'opacity:.5'}"><td>${esc(p.sku || '')}</td><td>${esc(p.name)}${p.active ? '' : ' <span class="badge gray">inactivo</span>'}</td>
-            <td class="num">${fmtMoney(p.price)}</td>
-            <td class="num"><span class="badge ${p.stock <= 0 ? 'danger' : p.stock <= p.min_stock ? 'warn' : 'ok'}">${p.stock}</span></td>
-            <td>${syncBadge(p)}</td>
-            <td style="white-space:nowrap"><button class="small" data-adj="${p.id}">Ajustar</button>
-              <button class="secondary small" data-edit="${p.id}">Editar</button>
-              <button class="secondary small" data-hist="${p.id}">Movimientos</button></td></tr>`
+            (a) => `<tr style="${a.active ? '' : 'opacity:.5'}">
+            <td style="width:56px">${a.thumb ? `<img src="${esc(a.thumb)}" alt="" class="thumb" />` : '<div class="thumb empty">sin foto</div>'}</td>
+            <td><b>${esc(a.name)}</b>${a.brand ? ` <small class="muted">${esc(a.brand)}</small>` : ''}
+              ${a.variants.length > 1 ? `<br><small class="muted">${a.variants.length} variantes: ${esc(a.variants.map((v) => v.values.join(' / ')).join(', '))}</small>` : a.variants[0] && a.variants[0].sku ? `<br><small class="muted">SKU ${esc(a.variants[0].sku)}</small>` : ''}
+              ${a.active ? '' : ' <span class="badge gray">inactivo</span>'}${a.image_count ? '' : ' <span class="badge warn">falta foto</span>'}</td>
+            <td><small>${esc(a.category || '-')}</small></td>
+            <td class="num">${priceCell(a)}</td>
+            <td class="num"><span class="badge ${a.stock <= 0 ? 'danger' : a.low_stock ? 'warn' : 'ok'}">${a.stock}</span></td>
+            <td>${onlineBadge(a, tnConnected)}</td>
+            <td style="white-space:nowrap"><button class="small" data-edit="${a.id}">Editar</button>
+              <button class="secondary small" data-adj="${a.id}">Stock</button>
+              <button class="secondary small" data-hist="${a.id}">Movimientos</button></td></tr>`
           )
           .join('')}</table></div>`
-      : '<p class="muted">No hay productos. Cargalos o importalos desde Tienda Nube (Configuración).</p>';
-    $$('[data-adj]').forEach((b) => (b.onclick = () => adjustModal(list.find((p) => p.id === Number(b.dataset.adj)))));
-    $$('[data-edit]').forEach((b) => (b.onclick = () => productModal(list.find((p) => p.id === Number(b.dataset.edit)))));
-    $$('[data-hist]').forEach(
-      (b) =>
-        (b.onclick = async () => {
-          const p = list.find((x) => x.id === Number(b.dataset.hist));
-          const mv = await adminApi(`/api/admin/stock-movements?productId=${p.id}`);
-          modal(`<h2>${esc(p.name)}</h2>${stockMovementsTable(mv)}<div class="actions"><button class="secondary" data-close>Cerrar</button></div>`, { wide: true });
-        })
-    );
-  };
+        : `<p class="muted">No hay artículos${f.q || f.categoryId || f.status ? ' con estos filtros' : ''}. ${
+            tree.length ? 'Tocá "+ Nuevo artículo" para cargar el primero.' : 'Empezá creando las categorías en la pestaña Categorías, o importá tus productos desde Tienda Nube (Configuración).'
+          }</p>`
+    }</div>`;
+  const reload = () => renderArticles();
   let t;
   $('#q').oninput = (e) => {
     clearTimeout(t);
-    t = setTimeout(() => ((app.stockQ = e.target.value), load()), 300);
+    t = setTimeout(() => {
+      f.q = e.target.value;
+      reload().then(() => {
+        const q = $('#q');
+        q.focus();
+        q.setSelectionRange(q.value.length, q.value.length);
+      });
+    }, 350);
   };
-  await load();
-};
+  $('#cat').onchange = (e) => ((f.categoryId = e.target.value), reload());
+  $('#st').onchange = (e) => ((f.status = e.target.value), reload());
+  $$('[data-edit]').forEach((b) => (b.onclick = async () => articleModal(await adminApi(`/api/admin/articles/${b.dataset.edit}`))));
+  $$('[data-adj]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        const a = await adminApi(`/api/admin/articles/${b.dataset.adj}`);
+        adjustModal(a);
+      })
+  );
+  $$('[data-hist]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        const a = list.find((x) => x.id === Number(b.dataset.hist));
+        const mv = await adminApi(`/api/admin/stock-movements?articleId=${a.id}`);
+        modal(`<h2>${esc(a.name)}</h2>${stockMovementsTable(mv, a.variants.length > 1)}<div class="actions"><button class="secondary" data-close>Cerrar</button></div>`, { wide: true });
+      })
+  );
+}
 
 function stockMovementsTable(list, withProduct = false) {
   if (!list.length) return '<p class="muted">Sin movimientos.</p>';
-  return `<div class="table-wrap"><table><tr><th>Fecha</th>${withProduct ? '<th>Producto</th>' : ''}<th>Tipo</th><th>Motivo</th><th class="num">Cantidad</th><th class="num">Stock</th><th>Usuario</th></tr>
+  return `<div class="table-wrap"><table><tr><th>Fecha</th>${withProduct ? '<th>Artículo</th>' : ''}<th>Tipo</th><th>Motivo</th><th class="num">Cantidad</th><th class="num">Stock</th><th>Usuario</th></tr>
     ${list
       .map(
         (m) => `<tr><td>${fmtDateTime(m.created_at)}</td>${withProduct ? `<td>${esc(m.product_name)}</td>` : ''}<td>${STOCK_TYPES[m.type] || m.type}</td>
@@ -1196,9 +1274,17 @@ function stockMovementsTable(list, withProduct = false) {
       .join('')}</table></div>`;
 }
 
-function adjustModal(p) {
-  const m = modal(`<h2>Ajustar stock</h2><p><b>${esc(p.name)}</b> · stock actual: <b>${p.stock}</b></p>
+// Ajuste de stock: si el artículo tiene variantes se elige cuál.
+function adjustModal(a) {
+  const variants = a.variants;
+  if (!variants.length) return toast('El artículo no tiene variantes activas', 'error');
+  const m = modal(`<h2>Ajustar stock</h2><p><b>${esc(a.name)}</b></p>
     <form id="f">
+      ${
+        variants.length > 1
+          ? `<label>Variante<select name="variant">${variants.map((v) => `<option value="${v.id}">${esc(v.values.join(' / '))} (stock ${v.stock})</option>`).join('')}</select></label>`
+          : `<input type="hidden" name="variant" value="${variants[0].id}" /><p class="muted">Stock actual: <b>${variants[0].stock}</b></p>`
+      }
       <label>Tipo de ajuste<select name="mode">
         <option value="add">Entrada (+)</option><option value="remove">Salida / rotura / uso interno (−)</option><option value="set">Conteo físico (fijar stock)</option>
       </select></label>
@@ -1210,64 +1296,452 @@ function adjustModal(p) {
     </form>`);
   const f = $('#f', m);
   const preview = () => {
+    const v = variants.find((x) => x.id === Number(f.variant.value));
     const q = Number(f.quantity.value) || 0;
-    const after = f.mode.value === 'set' ? q : f.mode.value === 'add' ? p.stock + q : p.stock - q;
+    const after = f.mode.value === 'set' ? q : f.mode.value === 'add' ? v.stock + q : v.stock - q;
     $('#prev', m).textContent = `Stock resultante: ${after}`;
   };
   f.oninput = preview;
   f.onsubmit = async (e) => {
     e.preventDefault();
-    if (await act(() => adminApi(`/api/admin/products/${p.id}/adjust`, { method: 'POST', body: formData(f) }), 'Stock actualizado')) {
+    const { variant, ...body } = formData(f);
+    if (await act(() => adminApi(`/api/admin/products/${variant}/adjust`, { method: 'POST', body }), 'Stock actualizado')) {
       m.remove();
-      VIEWS.stock();
+      if (app.view === 'inventario') renderArticles();
     }
   };
 }
 
-function productModal(p = null) {
-  const m = modal(`<h2>${p ? 'Editar producto' : 'Nuevo producto'}</h2><form id="f">
-    <div class="grid cols-2"><label>Nombre<input name="name" required value="${esc(p?.name || '')}" /></label>
-    <label>SKU / código<input name="sku" value="${esc(p?.sku || '')}" /></label></div>
-    <label>Descripción<textarea name="description" rows="2">${esc(p?.description || '')}</textarea></label>
-    <div class="grid cols-3"><label>Precio<input name="price" type="number" step="0.01" min="0" required value="${p?.price ?? ''}" /></label>
-    ${p ? '' : '<label>Stock inicial<input name="stock" type="number" step="1" min="0" value="0" /></label>'}
-    <label>Stock mínimo (alerta)<input name="min_stock" type="number" step="1" min="0" value="${p?.min_stock ?? 0}" /></label></div>
-    <label class="check"><input type="checkbox" name="publish_online" ${!p || p.publish_online ? 'checked' : ''} /> Publicar en Tienda Nube</label>
-    <label class="check"><input type="checkbox" name="active" ${!p || p.active ? 'checked' : ''} /> Activo</label>
-    ${p && p.tn_product_id ? `<p class="muted">Vinculado a Tienda Nube (producto ${esc(p.tn_product_id)})${p.tn_last_sync ? ` · última sincronización ${fmtDateTime(p.tn_last_sync)}` : ''}</p>` : ''}
-    ${p && p.tn_sync_error ? `<div class="alert danger">${esc(p.tn_sync_error)}</div>` : ''}
-    <div class="actions">
-      ${p ? '<button type="button" class="danger" id="del">Eliminar</button><button type="button" class="secondary" id="sync">Sincronizar ahora</button>' : ''}
-      <button type="button" class="secondary" data-close>Cancelar</button><button>Guardar</button></div></form>`);
-  const f = $('#f', m);
-  f.onsubmit = async (e) => {
-    e.preventDefault();
-    const body = formData(f);
-    body.active = f.active.checked;
-    body.publish_online = f.publish_online.checked;
-    const r = await act(() => adminApi(p ? `/api/admin/products/${p.id}` : '/api/admin/products', { method: p ? 'PUT' : 'POST', body }), 'Producto guardado');
-    if (r) {
-      m.remove();
-      VIEWS.stock();
+// Achica la foto en el navegador (máx. 1600 px, JPG) para que suba rápido.
+function resizeImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer la foto'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('El archivo no es una imagen válida'));
+      img.onload = () => {
+        const max = 1600;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Combina los valores de cada tipo de variante: [[S,M],[Rojo]] -> [[S,Rojo],[M,Rojo]]
+const combinations = (lists) => lists.reduce((acc, list) => acc.flatMap((prev) => list.map((x) => [...prev, x])), [[]]);
+
+async function articleModal(a = null) {
+  const tree = app.categories && app.categories.length ? app.categories : await adminApi('/api/admin/categories');
+  app.categories = tree;
+  const st = {
+    images: a ? a.images.map((i) => ({ id: i.id, src: i.src })) : [],
+    hasVariants: a ? a.attributes.length > 0 : false,
+    attributes: a && a.attributes.length ? [...a.attributes] : [''],
+    variants: a
+      ? a.variants.map((v) => ({ id: v.id, values: [...v.values], sku: v.sku || '', price: v.price, promo_price: v.promo_price || '', stock: v.stock, weight: v.weight && v.weight !== a.weight ? v.weight : '' }))
+      : [{ values: [], sku: '', price: '', promo_price: '', stock: 0, weight: '' }],
+  };
+  const top = a && a.category ? a.category.id : '';
+  const sub = a && a.subcategory ? a.subcategory.id : '';
+  const m = modal(
+    `<h2>${a ? 'Editar artículo' : 'Nuevo artículo'}</h2>
+    <form id="af" novalidate>
+      <h3>Fotos <small class="muted">(de 1 a ${MAX_PHOTOS}, la primera es la principal)</small></h3>
+      <div class="photos" id="photos"></div>
+      <input type="file" id="photo-input" accept="image/*" multiple class="hidden" />
+
+      <h3 style="margin-top:1rem">Datos del artículo</h3>
+      <div class="grid cols-2">
+        <label>Nombre *<input name="name" required value="${esc(a ? a.name : '')}" placeholder="Ej: Crema hidratante post bronceado" /></label>
+        <label>Marca<input name="brand" value="${esc(a && a.brand ? a.brand : '')}" list="brands" /></label>
+      </div>
+      <div class="grid cols-2">
+        <label>Categoría * <button type="button" class="link" id="add-cat">+ nueva</button>
+          <select name="category"><option value="">Elegí una categoría</option>${tree.map((c) => `<option value="${c.id}" ${String(top) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+        <label>Subcategoría <button type="button" class="link" id="add-sub">+ nueva</button><select name="subcategory"></select></label>
+      </div>
+      <label>Descripción<textarea name="description" rows="4" placeholder="Beneficios, modo de uso, ingredientes…">${esc(a && a.description ? a.description : '')}</textarea></label>
+
+      <h3 style="margin-top:1rem">Precio y stock</h3>
+      <label class="check"><input type="checkbox" id="has-variants" ${st.hasVariants ? 'checked' : ''} /> Este artículo tiene variantes (ej: tamaño, color, aroma)</label>
+      <div id="variants-box"></div>
+      <label style="max-width:220px">Avisar cuando el stock baje de<input name="minStock" type="number" min="0" step="1" value="${a && a.variants[0] ? a.variants[0].min_stock : 0}" /></label>
+
+      <h3 style="margin-top:1rem">Envío <small class="muted">(obligatorio para publicar en la tienda: se usa para calcular el costo de envío)</small></h3>
+      <div class="grid cols-4">
+        <label>Peso (kg) *<input name="weight" type="number" step="0.001" min="0" value="${a && a.weight ? a.weight : ''}" placeholder="0,250" /></label>
+        <label>Alto (cm) *<input name="height" type="number" step="0.1" min="0" value="${a && a.height ? a.height : ''}" /></label>
+        <label>Ancho (cm) *<input name="width" type="number" step="0.1" min="0" value="${a && a.width ? a.width : ''}" /></label>
+        <label>Profundidad / largo (cm) *<input name="depth" type="number" step="0.1" min="0" value="${a && a.depth ? a.depth : ''}" /></label>
+      </div>
+      <label class="check"><input type="checkbox" name="freeShipping" ${a && a.free_shipping ? 'checked' : ''} /> Envío gratis</label>
+
+      <h3 style="margin-top:1rem">Publicación</h3>
+      <label class="check"><input type="checkbox" name="publishOnline" ${!a || a.publish_online ? 'checked' : ''} /> Publicar en la tienda online (Tienda Nube)</label>
+      <label class="check"><input type="checkbox" name="active" ${!a || a.active ? 'checked' : ''} /> Activo (se puede vender)</label>
+      ${a && a.tn_product_id ? `<p class="muted">Publicado en Tienda Nube${a.tn_last_sync ? ` · última actualización ${fmtDateTime(a.tn_last_sync)}` : ''}</p>` : ''}
+      ${a && a.tn_sync_error ? `<div class="alert danger">${esc(a.tn_sync_error)}</div>` : ''}
+      <div class="alert danger hidden" id="form-error"></div>
+      <div class="actions">
+        ${a ? '<button type="button" class="danger" id="del">Eliminar</button><button type="button" class="secondary" id="sync">Publicar ahora</button>' : ''}
+        <button type="button" class="secondary" data-close>Cancelar</button><button id="save">Guardar</button>
+      </div>
+    </form>`,
+    { wide: true }
+  );
+  const f = $('#af', m);
+
+  // --- Categorías ---
+  const fillSubs = (selected = '') => {
+    const cat = tree.find((c) => String(c.id) === String(f.category.value));
+    const subs = cat ? cat.children : [];
+    f.subcategory.innerHTML = `<option value="">${subs.length ? 'Sin subcategoría' : '—'}</option>` + subs.map((s) => `<option value="${s.id}" ${String(selected) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+    f.subcategory.disabled = !cat;
+    $('#add-sub', m).disabled = !cat;
+  };
+  f.category.onchange = () => fillSubs();
+  fillSubs(sub);
+  const quickCategory = async (parentId) => {
+    const name = prompt(parentId ? 'Nombre de la nueva subcategoría' : 'Nombre de la nueva categoría');
+    if (!name) return;
+    const c = await act(() => adminApi('/api/admin/categories', { method: 'POST', body: { name, parentId } }), 'Categoría creada');
+    if (!c) return;
+    if (parentId) {
+      tree.find((x) => x.id === parentId).children.push({ ...c, children: [] });
+      fillSubs(c.id);
+    } else {
+      tree.push({ ...c, children: [] });
+      f.category.insertAdjacentHTML('beforeend', `<option value="${c.id}">${esc(c.name)}</option>`);
+      f.category.value = c.id;
+      fillSubs();
     }
   };
-  if (p) {
+  $('#add-cat', m).onclick = () => quickCategory(null);
+  $('#add-sub', m).onclick = () => f.category.value && quickCategory(Number(f.category.value));
+
+  // --- Fotos ---
+  const renderPhotos = () => {
+    $('#photos', m).innerHTML =
+      st.images
+        .map(
+          (img, i) => `<div class="photo"><img src="${esc(img.src)}" alt="Foto ${i + 1}" />
+          ${i === 0 ? '<span class="badge ok main">Principal</span>' : ''}
+          <div class="photo-actions">
+            ${i > 0 ? `<button type="button" class="secondary small" data-left="${i}" title="Mover a la izquierda">◀</button>` : ''}
+            ${i < st.images.length - 1 ? `<button type="button" class="secondary small" data-right="${i}" title="Mover a la derecha">▶</button>` : ''}
+            <button type="button" class="danger small" data-rm="${i}" title="Quitar">✕</button>
+          </div></div>`
+        )
+        .join('') +
+      (st.images.length < MAX_PHOTOS ? `<button type="button" class="photo add" id="add-photo"><span>+</span>Agregar foto</button>` : '');
+    const move = (i, d) => {
+      const [x] = st.images.splice(i, 1);
+      st.images.splice(i + d, 0, x);
+      renderPhotos();
+    };
+    $$('[data-left]', m).forEach((b) => (b.onclick = () => move(Number(b.dataset.left), -1)));
+    $$('[data-right]', m).forEach((b) => (b.onclick = () => move(Number(b.dataset.right), 1)));
+    $$('[data-rm]', m).forEach((b) => (b.onclick = () => (st.images.splice(Number(b.dataset.rm), 1), renderPhotos())));
+    if ($('#add-photo', m)) $('#add-photo', m).onclick = () => $('#photo-input', m).click();
+  };
+  $('#photo-input', m).onchange = async (e) => {
+    const files = [...e.target.files].slice(0, MAX_PHOTOS - st.images.length);
+    for (const file of files) {
+      try {
+        const data = await resizeImage(file);
+        st.images.push({ data, src: data });
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    }
+    e.target.value = '';
+    renderPhotos();
+  };
+  renderPhotos();
+
+  // --- Variantes ---
+  const readVariantInputs = () => {
+    $$('[data-vf]', m).forEach((inp) => {
+      const row = st.variants[Number(inp.dataset.row)];
+      if (!row) return;
+      if (inp.dataset.vf === 'value') row.values[Number(inp.dataset.k)] = inp.value;
+      else row[inp.dataset.vf] = inp.value;
+    });
+    $$('[data-attr]', m).forEach((inp) => (st.attributes[Number(inp.dataset.attr)] = inp.value));
+  };
+  const renderVariants = () => {
+    const box = $('#variants-box', m);
+    if (!st.hasVariants) {
+      const v = st.variants[0] || { values: [], sku: '', price: '', promo_price: '', stock: 0 };
+      st.variants = [v];
+      box.innerHTML = `<div class="grid cols-4">
+        <label>Precio *<input type="number" min="0" step="0.01" data-vf="price" data-row="0" value="${esc(v.price)}" /></label>
+        <label>Precio promocional<input type="number" min="0" step="0.01" data-vf="promo_price" data-row="0" value="${esc(v.promo_price)}" placeholder="opcional" /></label>
+        <label>Stock<input type="number" min="0" step="1" data-vf="stock" data-row="0" value="${esc(v.stock)}" /></label>
+        <label>SKU / código<input data-vf="sku" data-row="0" value="${esc(v.sku)}" placeholder="opcional" /></label>
+      </div>`;
+      return;
+    }
+    const attrs = st.attributes;
+    box.innerHTML = `
+      <div class="card" style="background:var(--bg)">
+        <p class="muted" style="margin-top:0">1. Escribí los tipos de variante y sus opciones separadas por coma, y tocá <b>Armar variantes</b>.</p>
+        ${attrs
+          .map(
+            (name, k) => `<div class="grid cols-2" style="align-items:end">
+              <label>Tipo de variante ${k + 1}<input data-attr="${k}" value="${esc(name)}" placeholder="${['Tamaño', 'Color', 'Aroma'][k] || ''}" /></label>
+              <div class="row"><label class="grow">Opciones<input data-opts="${k}" placeholder="${['100ml, 250ml, 500ml', 'Rojo, Azul', 'Coco, Vainilla'][k] || ''}" /></label>
+                ${attrs.length > 1 ? `<button type="button" class="danger small" data-rm-attr="${k}" style="margin-bottom:0.8em">✕</button>` : ''}</div>
+            </div>`
+          )
+          .join('')}
+        <div class="row">
+          ${attrs.length < 3 ? '<button type="button" class="secondary small" id="add-attr">+ Otro tipo de variante</button>' : ''}
+          <button type="button" class="small" id="gen">Armar variantes</button>
+        </div>
+      </div>
+      <p class="muted">2. Completá precio y stock de cada variante.</p>
+      <div class="table-wrap"><table class="variants">
+        <tr>${attrs.map((x) => `<th>${esc(x || 'Variante')}</th>`).join('')}<th>Precio *</th><th>Promocional</th><th>Stock</th><th>SKU</th><th>Peso (kg)</th><th></th></tr>
+        ${st.variants
+          .map(
+            (v, i) => `<tr>
+            ${attrs.map((_, k) => `<td><input data-vf="value" data-k="${k}" data-row="${i}" value="${esc(v.values[k] || '')}" /></td>`).join('')}
+            <td><input type="number" min="0" step="0.01" data-vf="price" data-row="${i}" value="${esc(v.price)}" /></td>
+            <td><input type="number" min="0" step="0.01" data-vf="promo_price" data-row="${i}" value="${esc(v.promo_price)}" /></td>
+            <td><input type="number" min="0" step="1" data-vf="stock" data-row="${i}" value="${esc(v.stock)}" style="width:70px" /></td>
+            <td><input data-vf="sku" data-row="${i}" value="${esc(v.sku)}" /></td>
+            <td><input type="number" min="0" step="0.001" data-vf="weight" data-row="${i}" value="${esc(v.weight)}" placeholder="igual" style="width:80px" /></td>
+            <td><button type="button" class="danger small" data-rm-row="${i}">✕</button></td></tr>`
+          )
+          .join('')}
+      </table></div>
+      <div class="row" style="margin-top:0.5rem">
+        <button type="button" class="secondary small" id="add-row">+ Agregar variante</button>
+        ${st.variants.length > 1 ? '<button type="button" class="secondary small" id="copy-price">Copiar precio de la primera a todas</button>' : ''}
+      </div>`;
+    const on = (sel, fn) => $(sel, m) && ($(sel, m).onclick = fn);
+    on('#add-attr', () => (readVariantInputs(), st.attributes.push(''), renderVariants()));
+    $$('[data-rm-attr]', m).forEach(
+      (b) =>
+        (b.onclick = () => {
+          readVariantInputs();
+          const k = Number(b.dataset.rmAttr);
+          st.attributes.splice(k, 1);
+          st.variants.forEach((v) => v.values.splice(k, 1));
+          renderVariants();
+        })
+    );
+    on('#gen', () => {
+      readVariantInputs();
+      const lists = st.attributes.map((_, k) =>
+        ($(`[data-opts="${k}"]`, m).value || '')
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean)
+      );
+      if (lists.some((l) => !l.length) || st.attributes.some((x) => !x.trim())) return toast('Completá cada tipo de variante con sus opciones', 'error');
+      const key = (vals) => vals.map((x) => String(x).toLowerCase()).join('|');
+      const existing = new Map(st.variants.filter((v) => v.values.length).map((v) => [key(v.values), v]));
+      const first = st.variants[0] || st.seed || {};
+      st.variants = combinations(lists).map(
+        (vals) => existing.get(key(vals)) || { values: vals, sku: '', price: first.price || '', promo_price: '', stock: 0, weight: '' }
+      );
+      renderVariants();
+    });
+    on('#add-row', () => (readVariantInputs(), st.variants.push({ values: [], sku: '', price: '', promo_price: '', stock: 0, weight: '' }), renderVariants()));
+    on('#copy-price', () => {
+      readVariantInputs();
+      st.variants.forEach((v) => {
+        v.price = st.variants[0].price;
+        v.promo_price = st.variants[0].promo_price;
+      });
+      renderVariants();
+    });
+    $$('[data-rm-row]', m).forEach((b) => (b.onclick = () => (readVariantInputs(), st.variants.splice(Number(b.dataset.rmRow), 1), renderVariants())));
+  };
+  $('#has-variants', m).onchange = (e) => {
+    readVariantInputs();
+    st.hasVariants = e.target.checked;
+    if (st.hasVariants) {
+      if (!st.attributes.length) st.attributes = [''];
+      // El precio cargado se usa como precio inicial de las variantes que se armen.
+      st.seed = st.variants[0];
+      if (!st.variants.some((v) => v.values.length)) st.variants = [];
+    } else {
+      const first = st.variants[0];
+      st.variants = [first ? { ...first, values: [] } : { values: [], sku: '', price: '', promo_price: '', stock: 0, weight: '' }];
+    }
+    renderVariants();
+  };
+  renderVariants();
+
+  // --- Guardar ---
+  const showError = (msg) => {
+    const el = $('#form-error', m);
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    readVariantInputs();
+    $('#form-error', m).classList.add('hidden');
+    if (!st.images.length) return showError('Agregá al menos una foto del artículo.');
+    if (st.hasVariants && !st.variants.length) return showError('Armá las variantes y completá su precio.');
+    const body = {
+      name: f.name.value,
+      brand: f.brand.value,
+      categoryId: f.subcategory.value || f.category.value,
+      description: f.description.value,
+      minStock: f.minStock.value,
+      weight: f.weight.value,
+      height: f.height.value,
+      width: f.width.value,
+      depth: f.depth.value,
+      freeShipping: f.freeShipping.checked,
+      publishOnline: f.publishOnline.checked,
+      active: f.active.checked,
+      attributes: st.hasVariants ? st.attributes.map((x) => x.trim()) : [],
+      images: st.images.map((img) => (img.id ? { id: img.id } : { data: img.data })),
+      variants: st.variants.map((v) => ({
+        id: v.id,
+        values: st.hasVariants ? v.values : [],
+        sku: v.sku,
+        price: v.price,
+        promo_price: v.promo_price,
+        stock: v.stock,
+        weight: v.weight,
+      })),
+    };
+    $('#save', m).disabled = true;
+    $('#save', m).textContent = 'Guardando…';
+    try {
+      await adminApi(a ? `/api/admin/articles/${a.id}` : '/api/admin/articles', { method: a ? 'PUT' : 'POST', body });
+      toast(f.publishOnline.checked && app.tnConnected ? 'Artículo guardado. Se está publicando en la tienda.' : 'Artículo guardado');
+      m.remove();
+      if (app.view === 'inventario') renderArticles();
+    } catch (err) {
+      showError(err.message);
+      $('#save', m).disabled = false;
+      $('#save', m).textContent = 'Guardar';
+    }
+  };
+  if (a) {
     $('#del', m).onclick = async () => {
-      if (!confirm('¿Eliminar el producto? Si tiene ventas o está en Tienda Nube se desactiva.')) return;
-      const r = await act(() => adminApi(`/api/admin/products/${p.id}`, { method: 'DELETE' }));
+      if (!confirm('¿Eliminar el artículo? Si tiene ventas o está publicado, se desactiva y se despublica de la tienda.')) return;
+      const r = await act(() => adminApi(`/api/admin/articles/${a.id}`, { method: 'DELETE' }));
       if (r) {
-        toast(r.deactivated ? 'Producto desactivado' : 'Producto eliminado');
+        toast(r.deactivated ? 'Artículo desactivado' : 'Artículo eliminado');
         m.remove();
-        VIEWS.stock();
+        renderArticles();
       }
     };
     $('#sync', m).onclick = async () => {
-      if (await act(() => adminApi(`/api/admin/products/${p.id}/sync`, { method: 'POST' }), 'Sincronizado con Tienda Nube')) {
+      $('#sync', m).disabled = true;
+      if (await act(() => adminApi(`/api/admin/articles/${a.id}/sync`, { method: 'POST' }), 'Publicado en Tienda Nube')) {
         m.remove();
-        VIEWS.stock();
-      }
+        renderArticles();
+      } else $('#sync', m).disabled = false;
     };
   }
+}
+
+async function renderCategories() {
+  const tree = await adminApi('/api/admin/categories');
+  app.categories = tree;
+  $('#tab').innerHTML = `<div class="card">
+    <div class="row between"><h2 style="margin:0">Categorías</h2><button class="small" id="new-cat">+ Nueva categoría</button></div>
+    <p class="muted">Se crean igual en tu Tienda Nube cuando publicás un artículo de esa categoría.</p>
+    ${
+      tree.length
+        ? tree
+            .map(
+              (c) => `<div class="cat-row"><div class="row between">
+                <div><b>${esc(c.name)}</b> <small class="muted">${c.articles} artículo(s)</small> ${c.tn_category_id ? '<span class="badge ok">En la tienda</span>' : ''}</div>
+                <div class="row"><button class="secondary small" data-sub="${c.id}">+ Subcategoría</button><button class="secondary small" data-ren="${c.id}">Renombrar</button><button class="danger small" data-del="${c.id}">Eliminar</button></div></div>
+                ${c.children
+                  .map(
+                    (s) => `<div class="row between cat-sub"><div>› ${esc(s.name)} <small class="muted">${s.articles} artículo(s)</small> ${s.tn_category_id ? '<span class="badge ok">En la tienda</span>' : ''}</div>
+                    <div class="row"><button class="secondary small" data-ren="${s.id}">Renombrar</button><button class="danger small" data-del="${s.id}">Eliminar</button></div></div>`
+                  )
+                  .join('')}</div>`
+            )
+            .join('')
+        : '<p class="muted">Todavía no hay categorías. Ej: "Cuidado corporal" con subcategorías "Post solar" y "Exfoliantes".</p>'
+    }</div>`;
+  const all = tree.flatMap((c) => [c, ...c.children]);
+  const save = async (body, id) => {
+    if (await act(() => adminApi(id ? `/api/admin/categories/${id}` : '/api/admin/categories', { method: id ? 'PUT' : 'POST', body }), 'Guardado')) renderCategories();
+  };
+  $('#new-cat').onclick = () => {
+    const name = prompt('Nombre de la categoría');
+    if (name) save({ name });
+  };
+  $$('[data-sub]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const name = prompt('Nombre de la subcategoría');
+        if (name) save({ name, parentId: Number(b.dataset.sub) });
+      })
+  );
+  $$('[data-ren]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const c = all.find((x) => x.id === Number(b.dataset.ren));
+        const name = prompt('Nuevo nombre', c.name);
+        if (name && name !== c.name) save({ name, parentId: c.parent_id }, c.id);
+      })
+  );
+  $$('[data-del]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        if (!confirm('¿Eliminar la categoría?')) return;
+        if (await act(() => adminApi(`/api/admin/categories/${b.dataset.del}`, { method: 'DELETE' }), 'Categoría eliminada')) renderCategories();
+      })
+  );
+}
+
+async function discountModal() {
+  const tree = await adminApi('/api/admin/categories');
+  const m = modal(`<h2>Descuentos</h2>
+    <p class="muted">Se aplica como <b>precio promocional</b>: en la tienda online se muestra el precio anterior tachado, y la caja cobra el precio con descuento.</p>
+    <form id="df">
+      <label>¿A qué artículos?<select name="categoryId"><option value="">Todo el inventario</option>${categoryOptions(tree)}</select></label>
+      <label>Descuento (%)<input name="percent" type="number" min="1" max="99" step="1" placeholder="Ej: 15" /></label>
+      <div class="actions">
+        <button type="button" class="danger" id="clear">Quitar descuentos</button>
+        <button type="button" class="secondary" data-close>Cancelar</button><button>Aplicar descuento</button>
+      </div>
+    </form>`);
+  const f = $('#df', m);
+  const apply = async (percent) => {
+    const scope = f.categoryId.value ? `la categoría "${f.categoryId.selectedOptions[0].textContent.replace('›', '').trim()}"` : 'todo el inventario';
+    if (!confirm(percent ? `¿Aplicar ${percent}% de descuento a ${scope}?` : `¿Quitar los precios promocionales de ${scope}?`)) return;
+    const r = await act(() => adminApi('/api/admin/articles/discount', { method: 'POST', body: { percent, categoryId: f.categoryId.value || null } }));
+    if (!r) return;
+    toast(`${percent ? 'Descuento aplicado' : 'Descuentos quitados'}: ${r.articles} artículo(s), ${r.variants} variante(s)`);
+    m.remove();
+    if (app.view === 'inventario') renderArticles();
+  };
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    const p = Number(f.percent.value);
+    if (!p || p < 1 || p > 99) return toast('Ingresá un porcentaje entre 1 y 99', 'error');
+    apply(p);
+  };
+  $('#clear', m).onclick = () => apply(0);
 }
 
 // ---------- Clientas ----------

@@ -4,7 +4,7 @@ Sistema web para un centro de estética / bronceado con:
 
 - **Reservas online**: las clientas eligen servicio, día y horario, y pagan una **seña con Mercado Pago** para confirmar el turno.
 - **Agenda**: turnos web y cargados en el local, reprogramación, cancelación con devolución de seña, "no vino", link de pago de seña por WhatsApp.
-- **Stock**: productos con ajustes (entrada, salida/rotura, conteo físico), historial de movimientos y alertas de stock mínimo. Sin módulo de compras.
+- **Inventario**: categorías y subcategorías, artículos con marca, descripción, 1 a 3 fotos, precio y precio promocional, peso y medidas, y variantes (tamaño, color, etc.). Ajustes de stock (entrada, salida/rotura, conteo físico), historial de movimientos, alertas de stock mínimo y descuentos por porcentaje. Sin módulo de compras.
 - **Caja**: apertura/cierre con arqueo, ventas de productos y servicios, cobro del saldo de los turnos, señas, ingresos/egresos, y cobro con **link/QR de Mercado Pago**.
 - **Tienda Nube**: los productos y el stock se replican en la tienda online, y las ventas de la web descuentan el stock del sistema.
 
@@ -92,11 +92,26 @@ Después:
 - **Registrar webhooks**: suscribe el sistema a `order/created`, `order/cancelled` y `product/deleted`.
 - **Enviar todo el stock**: publica / actualiza todos los productos en la web.
 
+### Inventario → tienda online
+
+Todo se carga desde **Inventario** y se publica completo en Tienda Nube, sin tener que completar nada allá:
+
+- **Categoría y subcategoría** (se crean en la tienda si no existen).
+- **Nombre, marca y descripción** (los párrafos se respetan).
+- **Fotos**: de 1 a 3 por artículo (obligatoria al menos una); se achican en el navegador antes de subir y se guardan en el volumen (`/data/uploads`).
+- **Variantes**: hasta 3 tipos (ej. Tamaño, Color), con precio, precio promocional, stock, SKU y peso por variante.
+- **Peso y medidas** (alto, ancho, profundidad): obligatorios para publicar, Tienda Nube los usa para calcular el envío. Opción de envío gratis.
+- **Descuentos**: el botón *% Descuentos* aplica un porcentaje a todo el inventario o a una categoría como precio promocional (en la web se ve el precio anterior tachado). La caja cobra el precio promocional.
+
+Si se cambian los tipos de variante de un artículo ya publicado (por ejemplo, se le agrega "Color"), Tienda Nube no permite transformarlo, así que el sistema vuelve a publicar el producto.
+
+La app de Tienda Nube necesita permisos de **Products** (lectura y escritura) y **Orders** (lectura).
+
 Sincronización:
 
 | Qué pasa | Efecto |
 |---|---|
-| Alta / edición de producto en el sistema | Se crea / actualiza en Tienda Nube (si "Publicar en Tienda Nube" está marcado) |
+| Alta / edición de artículo en el sistema | Se crea / actualiza en Tienda Nube con fotos, variantes, categorías y medidas (si "Publicar en la tienda online" está marcado) |
 | Venta en caja, ajuste de stock, anulación | Se envía el nuevo stock a Tienda Nube |
 | Orden nueva en Tienda Nube | Se descuenta el stock en el sistema |
 | Orden cancelada en Tienda Nube | Se repone el stock en el sistema |
@@ -129,6 +144,7 @@ src/
     mercadopago.js     cliente de la API de Mercado Pago
     tiendanube.js      cliente y sincronización con Tienda Nube
     weborders.js       ventas web (órdenes de Tienda Nube)
+    inventory.js       categorías, artículos, variantes, fotos y descuentos
     stock.js           movimientos de stock
     cash.js            caja, ventas y movimientos
   routes/              API pública, panel y webhooks

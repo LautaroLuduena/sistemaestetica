@@ -80,6 +80,57 @@ CREATE TABLE IF NOT EXISTS appointments (
 );
 CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date, status);
 
+-- Inventario: categoría > subcategoría > artículo > variantes (cada variante es una fila de products).
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  parent_id INTEGER REFERENCES categories(id),
+  tn_category_id TEXT,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS articles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT,
+  brand TEXT,
+  category_id INTEGER REFERENCES categories(id),
+  attributes TEXT NOT NULL DEFAULT '[]',
+  weight REAL,
+  width REAL,
+  height REAL,
+  depth REAL,
+  free_shipping INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  publish_online INTEGER NOT NULL DEFAULT 1,
+  tn_product_id TEXT,
+  tn_attributes TEXT,
+  tn_sync_status TEXT,
+  tn_sync_error TEXT,
+  tn_last_sync TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS article_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+  filename TEXT,
+  url TEXT,
+  position INTEGER NOT NULL DEFAULT 1,
+  tn_image_id TEXT,
+  tn_position INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Borrados pendientes de replicar en Tienda Nube (variantes, fotos, productos).
+CREATE TABLE IF NOT EXISTS tn_pending_deletes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sku TEXT UNIQUE,
@@ -263,6 +314,13 @@ const MIGRATIONS = [
   ['appointments', 'wa_sent_at', 'TEXT'],
   ['appointments', 'mp_checked_at', 'TEXT'],
   ['sales', 'mp_checked_at', 'TEXT'],
+  ['products', 'article_id', 'INTEGER REFERENCES articles(id)'],
+  ['products', 'variant_values', "TEXT NOT NULL DEFAULT '[]'"],
+  ['products', 'promo_price', 'REAL'],
+  ['products', 'weight', 'REAL'],
+  ['products', 'width', 'REAL'],
+  ['products', 'height', 'REAL'],
+  ['products', 'depth', 'REAL'],
 ];
 
 function migrate(conn) {
@@ -270,12 +328,83 @@ function migrate(conn) {
     const cols = conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
     if (!cols.includes(column)) conn.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+  migrateProductsToArticles(conn);
 }
+
+/**
+ * Los productos de la versión anterior pasan a ser artículos. Los que venían de la misma
+ * publicación de Tienda Nube ("Nombre - Variante") se agrupan como variantes de un mismo artículo.
+ */
+function migrateProductsToArticles(conn) {
+  const orphans = conn.prepare('SELECT * FROM products WHERE article_id IS NULL ORDER BY id').all();
+  if (!orphans.length) return;
+  const groups = new Map();
+  for (const p of orphans) {
+    const key = p.tn_product_id ? `tn:${p.tn_product_id}` : `p:${p.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  const insertArticle = conn.prepare(
+    `INSERT INTO articles (name, description, attributes, active, publish_online, tn_product_id, tn_attributes, tn_sync_status, tn_sync_error, tn_last_sync)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const updateProduct = conn.prepare('UPDATE products SET article_id = ?, variant_values = ? WHERE id = ?');
+  conn.exec('BEGIN');
+  try {
+    for (const rows of groups.values()) {
+      const multi = rows.length > 1;
+      const base = multi ? commonPrefix(rows.map((r) => r.name)) : rows[0].name;
+      const attrs = multi ? ['Variante'] : [];
+      const first = rows[0];
+      const art = insertArticle.run(
+        base || first.name,
+        first.description,
+        JSON.stringify(attrs),
+        rows.some((r) => r.active) ? 1 : 0,
+        first.publish_online,
+        first.tn_product_id,
+        first.tn_product_id ? JSON.stringify(attrs) : null,
+        first.tn_sync_status,
+        first.tn_sync_error,
+        first.tn_last_sync
+      );
+      for (const r of rows) {
+        const value = multi ? r.name.slice(base.length).replace(/^[\s-–/]+/, '').trim() || r.name : null;
+        updateProduct.run(Number(art.lastInsertRowid), JSON.stringify(multi ? [value] : []), r.id);
+      }
+    }
+    conn.exec('COMMIT');
+  } catch (err) {
+    conn.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+function commonPrefix(names) {
+  // "Aceite - 100ml" y "Aceite - 250ml" => "Aceite"
+  const parts = names.map((n) => n.split(' - '));
+  const out = [];
+  for (let i = 0; i < parts[0].length - 1; i++) {
+    if (parts.every((p) => p[i] === parts[0][i] && p.length > i + 1)) out.push(parts[0][i]);
+    else break;
+  }
+  return out.join(' - ');
+}
+
+let dbFile = null;
 
 function init(file) {
   if (db) db.close();
-  db = open(file || process.env.DB_FILE || path.join(__dirname, '..', 'data', 'estetica.db'));
+  dbFile = file || process.env.DB_FILE || path.join(__dirname, '..', 'data', 'estetica.db');
+  db = open(dbFile);
   return db;
+}
+
+// Carpeta donde se guardan las fotos (junto a la base, así quedan en el volumen persistente).
+function uploadsDir() {
+  if (process.env.UPLOADS_DIR) return process.env.UPLOADS_DIR;
+  if (!dbFile || dbFile === ':memory:') return path.join(require('node:os').tmpdir(), 'estetica-uploads');
+  return path.join(path.dirname(dbFile), 'uploads');
 }
 
 function get() {
@@ -306,4 +435,4 @@ const all = (sql, ...params) => get().prepare(sql).all(...params);
 const one = (sql, ...params) => get().prepare(sql).get(...params);
 const run = (sql, ...params) => get().prepare(sql).run(...params);
 
-module.exports = { init, get, tx, all, one, run };
+module.exports = { init, get, tx, all, one, run, uploadsDir };

@@ -16,7 +16,7 @@ let base;
 let cookie;
 
 // ---- Simulación de las APIs de Mercado Pago y Tienda Nube ----
-const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [], waMessages: [], waFail: null, orderList: [] };
+const remote = { payments: {}, preferences: [], tnCalls: [], orders: {}, products: [], waMessages: [], waFail: null, orderList: [], categories: [], nextProductId: 900 };
 
 function reply(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -57,7 +57,15 @@ http.fetch = async (url, opts = {}) => {
     const order = path.match(/^\/orders\/(\d+)$/);
     if (order) return reply(200, remote.orders[order[1]]);
     if (path === '/orders') return reply(200, u.searchParams.get('page') === '1' ? remote.orderList : []);
-    if (path === '/products' && opts.method === 'POST') return reply(201, { id: 900, variants: [{ id: 901 }] });
+    if (path === '/products' && opts.method === 'POST') {
+      const body = JSON.parse(opts.body);
+      const pid = remote.nextProductId++;
+      return reply(201, { id: pid, variants: body.variants.map((v, i) => ({ id: pid + 1 + i, sku: v.sku, values: v.values || [] })) });
+    }
+    if (path === '/categories' && opts.method === 'POST') return reply(201, { id: 300 + remote.tnCalls.filter((c) => c.path === '/categories' && c.method === 'POST').length });
+    if (path === '/categories' && (opts.method || 'GET') === 'GET') return reply(200, u.searchParams.get('page') === '1' ? remote.categories : []);
+    if (/^\/products\/\d+\/images$/.test(path) && opts.method === 'POST') return reply(201, { id: 7000 + remote.tnCalls.length });
+    if (/^\/products\/\d+\/variants$/.test(path) && opts.method === 'POST') return reply(201, { id: 5000 + remote.tnCalls.length });
     if (path === '/products' && (opts.method || 'GET') === 'GET') return reply(200, u.searchParams.get('page') === '1' ? remote.products : []);
     return reply(200, {});
   }
@@ -80,6 +88,7 @@ async function call(path, { method = 'GET', body, headers = {} } = {}) {
   return { status: res.status, data };
 }
 
+const base_url = () => base;
 const waitQueue = () => new Promise((r) => setTimeout(r, 600));
 
 // Un día abierto dentro de la ventana de reservas.
@@ -194,30 +203,147 @@ test('firma de webhook de Mercado Pago inválida es rechazada', async () => {
   }
 });
 
-test('stock: alta, ajustes y sincronización con Tienda Nube', async () => {
-  const created = await call('/api/admin/products', { method: 'POST', body: { name: 'Crema post bronceado', sku: 'CR-1', price: 9000, stock: 10, min_stock: 2 } });
-  assert.equal(created.status, 201);
-  assert.equal(created.data.stock, 10);
+const PHOTO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+const SIZES = { weight: 0.3, width: 8, height: 15, depth: 5 };
+
+test('inventario: categorías, artículo con fotos y medidas, ajustes y publicación en Tienda Nube', async () => {
+  const cat = (await call('/api/admin/categories', { method: 'POST', body: { name: 'Cuidado corporal' } })).data;
+  const sub = (await call('/api/admin/categories', { method: 'POST', body: { name: 'Post solar', parentId: cat.id } })).data;
+  assert.equal(sub.parent_id, cat.id);
+  const tree = (await call('/api/admin/categories')).data;
+  assert.equal(tree.find((c) => c.id === cat.id).children[0].name, 'Post solar');
+
+  // Validaciones: foto y medidas obligatorias para publicar.
+  const base = { name: 'Crema post bronceado', brand: 'Sol Glow', categoryId: sub.id, description: 'Hidrata.\n\nUsar después de la sesión.', minStock: 2, ...SIZES };
+  const noPhoto = await call('/api/admin/articles', { method: 'POST', body: { ...base, images: [], variants: [{ sku: 'CR-1', price: 9000, stock: 10 }] } });
+  assert.equal(noPhoto.status, 400);
+  assert.match(noPhoto.data.error, /foto/);
+  const noSizes = await call('/api/admin/articles', { method: 'POST', body: { ...base, weight: '', images: [{ data: PHOTO }], variants: [{ sku: 'CR-1', price: 9000, stock: 10 }] } });
+  assert.match(noSizes.data.error, /peso/);
+  const badPromo = await call('/api/admin/articles', { method: 'POST', body: { ...base, images: [{ data: PHOTO }], variants: [{ sku: 'CR-1', price: 9000, promo_price: 9500, stock: 10 }] } });
+  assert.match(badPromo.data.error, /promocional/);
+
+  const created = await call('/api/admin/articles', { method: 'POST', body: { ...base, images: [{ data: PHOTO }, { data: PHOTO }], variants: [{ sku: 'CR-1', price: 9000, stock: 10 }] } });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const art = created.data;
+  assert.equal(art.stock, 10);
+  assert.equal(art.images.length, 2);
+  assert.ok(art.images[0].src.startsWith('/uploads/'));
+  const img = await fetch(base_url() + art.images[0].src);
+  assert.equal(img.status, 200);
   await waitQueue();
+
+  const catPosts = remote.tnCalls.filter((c) => c.method === 'POST' && c.path === '/categories');
+  assert.equal(catPosts.length, 2);
+  assert.equal(catPosts[1].body.parent, 301); // la subcategoría cuelga de la categoría creada (id 301)
   const post = remote.tnCalls.find((c) => c.method === 'POST' && c.path === '/products');
   assert.ok(post, 'se crea el producto en Tienda Nube');
-  assert.equal(post.body.variants[0].stock, 10);
-  assert.equal(post.body.variants[0].sku, 'CR-1');
+  assert.equal(post.body.brand, 'Sol Glow');
+  assert.equal(post.body.description.es, '<p>Hidrata.</p><p>Usar después de la sesión.</p>');
+  assert.equal(post.body.categories.length, 2);
+  assert.deepEqual(post.body.attributes, []);
+  const v0 = post.body.variants[0];
+  assert.equal(v0.stock, 10);
+  assert.equal(v0.sku, 'CR-1');
+  assert.equal(v0.price, '9000.00');
+  assert.equal(v0.promotional_price, null);
+  assert.deepEqual([v0.weight, v0.width, v0.height, v0.depth], ['0.3', '8', '15', '5']);
+  const imgPosts = remote.tnCalls.filter((c) => c.method === 'POST' && c.path === '/products/900/images');
+  assert.equal(imgPosts.length, 2);
+  assert.ok(imgPosts[0].body.attachment.length > 10);
 
+  // Ajustes de stock: se envía solo el stock de la variante.
+  const variantId = art.variants[0].id;
   remote.tnCalls.length = 0;
-  const adj = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'remove', quantity: 3, reason: 'Rotura' } });
+  const adj = await call(`/api/admin/products/${variantId}/adjust`, { method: 'POST', body: { mode: 'remove', quantity: 3, reason: 'Rotura' } });
   assert.equal(adj.data.stock, 7);
-  const set = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'set', quantity: 12, reason: 'Conteo' } });
+  const set = await call(`/api/admin/products/${variantId}/adjust`, { method: 'POST', body: { mode: 'set', quantity: 12, reason: 'Conteo' } });
   assert.equal(set.data.stock, 12);
   await waitQueue();
   const puts = remote.tnCalls.filter((c) => c.method === 'PUT' && c.path === '/products/900/variants/901');
   assert.ok(puts.length >= 1);
-  assert.equal(puts.at(-1).body.stock, 12);
+  assert.deepEqual(puts.at(-1).body, { stock_management: true, stock: 12 });
 
-  const noReason = await call(`/api/admin/products/${created.data.id}/adjust`, { method: 'POST', body: { mode: 'add', quantity: 1 } });
+  const noReason = await call(`/api/admin/products/${variantId}/adjust`, { method: 'POST', body: { mode: 'add', quantity: 1 } });
   assert.equal(noReason.status, 400);
-  const mv = (await call(`/api/admin/stock-movements?productId=${created.data.id}`)).data;
+  const mv = (await call(`/api/admin/stock-movements?articleId=${art.id}`)).data;
   assert.deepEqual(mv.map((m) => m.quantity), [5, -3, 10]);
+});
+
+test('inventario: artículo con variantes, edición, descuentos y borrado de variantes', async () => {
+  const cat = db.one(`SELECT id FROM categories WHERE name = 'Cuidado corporal'`);
+  remote.tnCalls.length = 0;
+  const body = {
+    name: 'Aceite bronceador',
+    categoryId: cat.id,
+    ...SIZES,
+    attributes: ['Tamaño'],
+    images: [{ data: PHOTO }],
+    variants: [
+      { values: ['100ml'], sku: 'AC-100', price: 6000, stock: 5 },
+      { values: ['250ml'], sku: 'AC-250', price: 11000, promo_price: 9900, stock: 3, weight: 0.5 },
+    ],
+  };
+  const dup = await call('/api/admin/articles', { method: 'POST', body: { ...body, variants: [body.variants[0], { ...body.variants[1], values: ['100ml'] }] } });
+  assert.match(dup.data.error, /repetida/);
+  const res = await call('/api/admin/articles', { method: 'POST', body });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  const art = res.data;
+  assert.equal(art.variants.length, 2);
+  assert.equal(art.variants[1].name, 'Aceite bronceador - 250ml');
+  assert.equal(art.variants[1].effective_price, 9900);
+  await waitQueue();
+  const post = remote.tnCalls.find((c) => c.method === 'POST' && c.path === '/products');
+  assert.deepEqual(post.body.attributes, [{ es: 'Tamaño' }]);
+  assert.deepEqual(post.body.variants[1].values, [{ es: '250ml' }]);
+  assert.equal(post.body.variants[1].promotional_price, '9900.00');
+  assert.equal(post.body.variants[1].weight, '0.5');
+  const pid = String(db.one('SELECT tn_product_id FROM articles WHERE id = ?', art.id).tn_product_id);
+
+  // La caja cobra el precio promocional.
+  const list = (await call('/api/admin/products?q=Aceite')).data;
+  assert.equal(list.find((p) => p.sku === 'AC-250').effective_price, 9900);
+
+  // Edición: se agrega una variante, se quita otra y el stock cambiado queda como ajuste.
+  remote.tnCalls.length = 0;
+  const [v100, v250] = (await call(`/api/admin/articles/${art.id}`)).data.variants;
+  assert.ok(v100.tn_variant_id, 'la variante ya tiene su id de Tienda Nube');
+  const edit = await call(`/api/admin/articles/${art.id}`, {
+    method: 'PUT',
+    body: {
+      ...body,
+      images: [{ id: art.images[0].id }],
+      variants: [
+        { id: v250.id, values: ['250ml'], sku: 'AC-250', price: 11000, stock: 8 },
+        { values: ['500ml'], sku: 'AC-500', price: 18000, stock: 2 },
+      ],
+    },
+  });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+  assert.deepEqual(edit.data.variants.map((v) => v.values[0]), ['250ml', '500ml']);
+  assert.equal(edit.data.variants[0].stock, 8);
+  assert.equal(edit.data.variants[0].promo_price, null);
+  assert.equal(db.one('SELECT COUNT(*) AS n FROM products WHERE id = ?', v100.id).n, 0);
+  await waitQueue();
+  assert.ok(remote.tnCalls.some((c) => c.method === 'DELETE' && c.path === `/products/${pid}/variants/${v100.tn_variant_id}`));
+  assert.ok(remote.tnCalls.some((c) => c.method === 'POST' && c.path === `/products/${pid}/variants`));
+  assert.ok(remote.tnCalls.some((c) => c.method === 'PUT' && c.path === `/products/${pid}`));
+  assert.ok(!remote.tnCalls.some((c) => c.path.includes('/images')), 'las fotos ya subidas no se reenvían');
+
+  // Descuento del 20% a la categoría (incluye subcategorías) y luego se quita.
+  remote.tnCalls.length = 0;
+  const d = (await call('/api/admin/articles/discount', { method: 'POST', body: { percent: 20, categoryId: cat.id } })).data;
+  assert.ok(d.variants >= 3);
+  const after = (await call(`/api/admin/articles/${art.id}`)).data;
+  assert.deepEqual(after.variants.map((v) => v.promo_price), [8800, 14400]);
+  await waitQueue();
+  const vPut = remote.tnCalls.find((c) => c.method === 'PUT' && c.path === `/products/${pid}/variants/${after.variants[0].tn_variant_id}`);
+  assert.equal(vPut.body.promotional_price, '8800.00');
+  await call('/api/admin/articles/discount', { method: 'POST', body: { percent: 0, categoryId: cat.id } });
+  assert.equal((await call(`/api/admin/articles/${art.id}`)).data.variants[0].promo_price, null);
+  // La crema vuelve a su precio normal para el resto de los tests.
+  assert.equal(db.one(`SELECT promo_price FROM products WHERE sku = 'CR-1'`).promo_price, null);
+  await waitQueue();
 });
 
 test('Tienda Nube: una orden descuenta stock local sin reenviarlo, y la cancelación lo repone', async () => {
@@ -255,19 +381,45 @@ test('Tienda Nube: webhook con HMAC inválido es rechazado cuando hay client sec
   }
 });
 
-test('Tienda Nube: importar productos vincula por SKU y crea los nuevos', async () => {
+test('Tienda Nube: importar trae artículos con variantes, fotos, categorías y medidas, y vincula por SKU', async () => {
+  remote.categories = [
+    { id: 400, name: { es: 'Bronceado' }, parent: null },
+    { id: 401, name: { es: 'Aceites' }, parent: 400 },
+  ];
   remote.products = [
-    { id: 900, name: { es: 'Crema post bronceado' }, variants: [{ id: 901, sku: 'CR-1', price: '9000.00', stock: 4, values: [] }] },
-    { id: 950, name: { es: 'Aceite' }, description: { es: '<p>Bronceador</p>' }, variants: [{ id: 951, sku: 'AC-1', price: '5000.00', stock: 6, values: [{ es: '100ml' }] }] },
+    { id: 900, name: { es: 'Crema post bronceado' }, attributes: [], categories: [], images: [], variants: [{ id: 901, sku: 'CR-1', price: '9000.00', stock: 4, values: [] }] },
+    {
+      id: 960,
+      name: { es: 'Aceite de coco' },
+      brand: 'Tropical',
+      description: { es: '<p>Bronceador natural.</p><p>Con <b>coco</b>.</p>' },
+      attributes: [{ es: 'Tamaño' }],
+      categories: [{ id: 401 }],
+      images: [{ id: 81, src: 'https://cdn.test/a.jpg', position: 1 }, { id: 82, src: 'https://cdn.test/b.jpg', position: 2 }],
+      published: true,
+      variants: [
+        { id: 961, sku: 'CO-1', price: '5000.00', promotional_price: '4500.00', stock: 6, values: [{ es: '100ml' }], weight: '0.20', width: '6.00', height: '12.00', depth: '6.00' },
+        { id: 962, sku: 'CO-2', price: '8000.00', promotional_price: null, stock: 2, values: [{ es: '250ml' }], weight: '0.40', width: '7.00', height: '16.00', depth: '7.00' },
+      ],
+    },
   ];
   const r = await call('/api/admin/integrations/tiendanube/import', { method: 'POST', body: { stockFrom: 'remote' } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.created, 1);
-  const aceite = db.one(`SELECT * FROM products WHERE sku = 'AC-1'`);
-  assert.equal(aceite.name, 'Aceite - 100ml');
-  assert.equal(aceite.stock, 6);
-  assert.equal(aceite.description, 'Bronceador');
+  const artId = db.one(`SELECT id FROM articles WHERE tn_product_id = '960'`).id;
+  const a = (await call(`/api/admin/articles/${artId}`)).data;
+  assert.equal(a.name, 'Aceite de coco');
+  assert.equal(a.brand, 'Tropical');
+  assert.equal(a.description, 'Bronceador natural.\n\nCon coco.');
+  assert.equal(a.category.name, 'Bronceado');
+  assert.equal(a.subcategory.name, 'Aceites');
+  assert.deepEqual(a.attributes, ['Tamaño']);
+  assert.equal(a.weight, 0.2);
+  assert.deepEqual(a.images.map((i) => i.src), ['https://cdn.test/a.jpg', 'https://cdn.test/b.jpg']);
+  assert.deepEqual(a.variants.map((v) => [v.values[0], v.stock, v.promo_price]), [['100ml', 6, 4500], ['250ml', 2, null]]);
+  // La crema ya existía: se vincula y toma el stock de la web.
   assert.equal(db.one(`SELECT stock FROM products WHERE sku = 'CR-1'`).stock, 4);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM articles WHERE tn_product_id = '900'`).n, 1);
 });
 
 test('caja: no se puede vender con la caja cerrada; venta, saldo de turno, anulación y cierre', async () => {

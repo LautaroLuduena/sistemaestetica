@@ -283,3 +283,20 @@ tr:last-child td { border-bottom: 0; }
   .appt { grid-template-columns: 70px 1fr; }
   .appt > :last-child { grid-column: 1 / -1; }
 }
+
+/* Inventario */
+.thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); display: block; background: #fff; }
+.thumb.empty { display: flex; align-items: center; justify-content: center; font-size: 0.65rem; color: var(--muted); background: var(--bg); }
+.product-tile .thumb { width: 100%; height: 90px; margin-bottom: 0.4rem; }
+.photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6rem; }
+.photo { position: relative; aspect-ratio: 1; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
+.photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo .main { position: absolute; top: 6px; left: 6px; }
+.photo-actions { position: absolute; bottom: 6px; right: 6px; display: flex; gap: 4px; }
+.photo.add { border: 2px dashed var(--border); background: var(--bg); color: var(--primary-dark); flex-direction: column; font-size: 0.9rem; }
+.photo.add span { font-size: 2rem; line-height: 1; }
+.photo.add:hover { background: var(--primary-soft); border-color: var(--primary); }
+table.variants input { padding: 0.35em 0.45em; min-width: 70px; }
+.cat-row { border-bottom: 1px solid var(--border); padding: 0.6rem 0; }
+.cat-sub { padding: 0.35rem 0 0.35rem 1.2rem; }
+label .link { font-size: 0.8rem; margin-left: 0.4rem; }

@@ -3,6 +3,9 @@ const agenda = require('./agenda');
 const stock = require('./stock');
 const { badRequest, notFound, conflict, round2, money, int } = require('../util');
 
+// Precio vigente: el promocional si hay uno menor al precio normal.
+const effectivePrice = (p) => (p.promo_price && p.promo_price > 0 && p.promo_price < p.price ? p.promo_price : p.price);
+
 // Medios de pago. "mp_link" genera un link/QR de Mercado Pago y la venta queda pendiente hasta que se acredita.
 const METHODS = {
   efectivo: 'Efectivo',
@@ -166,7 +169,7 @@ function buildItems(items) {
       const p = stock.getProduct(it.productId);
       const quantity = int(it.quantity ?? 1);
       if (quantity <= 0) throw badRequest('La cantidad debe ser mayor a cero');
-      const unit = it.unitPrice !== undefined && it.unitPrice !== null && it.unitPrice !== '' ? money(it.unitPrice, 'precio') : p.price;
+      const unit = it.unitPrice !== undefined && it.unitPrice !== null && it.unitPrice !== '' ? money(it.unitPrice, 'precio') : effectivePrice(p);
       return { product_id: p.id, description: p.name, quantity, unit_price: unit, subtotal: round2(unit * quantity) };
     }
     if (it.appointmentId) {

@@ -64,13 +64,24 @@ function change(productId, { delta, setTo, type = 'adjustment', reason = null, r
   return result.product;
 }
 
-function movements({ productId, limit = 200 }) {
+function movements({ productId = null, articleId = null, limit = 200 }) {
+  const where = [];
+  const params = [];
+  if (productId) {
+    where.push('m.product_id = ?');
+    params.push(productId);
+  }
+  if (articleId) {
+    where.push('p.article_id = ?');
+    params.push(articleId);
+  }
   return db.all(
     `SELECT m.*, p.name AS product_name, p.sku, u.username
      FROM stock_movements m JOIN products p ON p.id = m.product_id LEFT JOIN users u ON u.id = m.user_id
-     ${productId ? 'WHERE m.product_id = ?' : ''}
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY m.id DESC LIMIT ?`,
-    ...(productId ? [productId, limit] : [limit])
+    ...params,
+    limit
   );
 }
 

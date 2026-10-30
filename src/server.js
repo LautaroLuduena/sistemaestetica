@@ -30,7 +30,8 @@ function createApp() {
   app.set('trust proxy', true);
   app.disable('x-powered-by');
   // Se guarda el body crudo para validar la firma de los webhooks de Tienda Nube.
-  app.use(express.json({ limit: '1mb', verify: (req, res, buf) => (req.rawBody = buf) }));
+  // 25mb: las fichas de artículos viajan con hasta 3 fotos.
+  app.use(express.json({ limit: '25mb', verify: (req, res, buf) => (req.rawBody = buf) }));
 
   // Versión publicada (Railway informa el commit de cada deploy).
   const version = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.SOURCE_COMMIT || '').slice(0, 7) || 'local';
@@ -70,6 +71,8 @@ function createApp() {
     }
   });
 
+  // Fotos de los artículos (guardadas junto a la base, en el volumen persistente).
+  app.use('/uploads', (req, res, next) => express.static(db.uploadsDir(), { maxAge: '30d', fallthrough: false })(req, res, next));
   app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'] }));
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
@@ -94,6 +97,10 @@ function bootstrap({ dbFile } = {}) {
   db.init(dbFile);
   seed();
   stock.setChangeListener((productId, opts) => tn.schedulePush(productId, opts));
+  require('./services/inventory').setListeners({
+    articleChanged: (articleId) => tn.scheduleArticle(articleId),
+    remoteDelete: (remotePath) => tn.queueRemoteDelete(remotePath),
+  });
   return createApp();
 }
 
