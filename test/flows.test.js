@@ -40,6 +40,11 @@ http.fetch = async (url, opts = {}) => {
     const r = u.pathname.match(/^\/v1\/payments\/(\d+)\/refunds$/);
     if (r) return reply(201, { id: 1, payment_id: r[1] });
   }
+  if (u.host === 'www.tiendanube.com' && u.pathname === '/apps/authorize/token') {
+    const body = JSON.parse(opts.body);
+    if (body.code !== 'codigo123' || body.client_secret !== 'secreto-app') return reply(400, { error: 'invalid_grant' });
+    return reply(200, { access_token: 'tn-token', token_type: 'bearer', scope: 'read_products', user_id: 555 });
+  }
   if (u.host === 'graph.facebook.com') {
     const body = JSON.parse(opts.body);
     remote.waMessages.push(body);
@@ -540,4 +545,26 @@ test('reprogramar: solo se ofrecen horarios libres y el propio turno no se bloqu
   assert.equal(ok.status, 200);
   assert.equal(ok.data.start_time, '11:30');
   assert.equal(ok.data.end_time, '12:00');
+});
+
+test('Tienda Nube: si se autoriza sin sesión en el panel, la conexión se completa después del login', async () => {
+  settings.set({ tn_client_id: '49569', tn_client_secret: 'secreto-app', tn_access_token: '', tn_store_id: '' });
+  try {
+    const res = await fetch(`${base}/integraciones/tiendanube/callback?code=codigo123`, { redirect: 'manual' });
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get('location'), '/admin/?tn_code=codigo123');
+    assert.equal(settings.get('tn_access_token'), '');
+
+    const bad = await call('/api/admin/integrations/tiendanube/exchange', { method: 'POST', body: { code: 'vencido' } });
+    assert.equal(bad.status, 400);
+    assert.match(bad.data.error, /vencido/);
+
+    const ok = await call('/api/admin/integrations/tiendanube/exchange', { method: 'POST', body: { code: 'codigo123' } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.data.storeId, '555');
+    assert.equal(settings.get('tn_access_token'), 'tn-token');
+    assert.equal(settings.get('tn_store_id'), '555');
+  } finally {
+    settings.set({ tn_client_secret: '', tn_access_token: 'tn-token', tn_store_id: '555' });
+  }
 });

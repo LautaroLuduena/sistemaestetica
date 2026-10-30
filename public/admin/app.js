@@ -84,10 +84,14 @@ async function start() {
   }
   $('#login-view').classList.add('hidden');
   $('#app-view').classList.remove('hidden');
-  const err = new URLSearchParams(location.search).get('error');
-  if (err) {
-    toast(err, 'error');
-    history.replaceState(null, '', location.pathname + location.hash);
+  const params = new URLSearchParams(location.search);
+  const err = params.get('error');
+  const tnCode = params.get('tn_code');
+  if (err || tnCode) history.replaceState(null, '', location.pathname + (tnCode ? '#config?tab=tn' : location.hash));
+  if (err) toast(err, 'error');
+  if (tnCode) {
+    const r = await act(() => adminApi('/api/admin/integrations/tiendanube/exchange', { method: 'POST', body: { code: tnCode } }));
+    if (r) toast(`Tienda Nube conectada (tienda ${r.storeId})`);
   }
   route();
 }

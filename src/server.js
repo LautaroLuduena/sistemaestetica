@@ -57,9 +57,12 @@ function createApp() {
 
   // Redirect URL de la app de Tienda Nube (OAuth). Requiere estar logueado en el panel.
   app.get('/integraciones/tiendanube/callback', async (req, res) => {
-    if (!auth.sessionUser(req)) return res.redirect('/admin/?error=' + encodeURIComponent('Ingresá al panel y volvé a conectar Tienda Nube'));
+    const code = String(req.query.code || '').replace(/[^a-zA-Z0-9]/g, '');
+    if (!code) return res.redirect('/admin/?error=' + encodeURIComponent('Tienda Nube no envió el código de autorización'));
+    // Sin sesión: se pide ingresar y el panel completa la conexión después del login (el código dura 5 minutos).
+    if (!auth.sessionUser(req)) return res.redirect(`/admin/?tn_code=${code}`);
     try {
-      await tn.exchangeCode(String(req.query.code || ''));
+      await tn.exchangeCode(code);
       res.redirect('/admin/#config?tn=ok');
     } catch (err) {
       log('tiendanube', 'error', `Error conectando la tienda: ${err.message}`);

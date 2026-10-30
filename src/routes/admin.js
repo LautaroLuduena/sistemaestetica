@@ -466,6 +466,18 @@ router.post('/integrations/tiendanube/push-all', async (req, res) => res.json(aw
 
 router.post('/integrations/tiendanube/webhooks', async (req, res) => res.json(await tn.registerWebhooks()));
 
+// Completa la conexión con el código que devuelve Tienda Nube (cuando se autorizó sin sesión en el panel).
+router.post('/integrations/tiendanube/exchange', async (req, res) => {
+  const code = String((req.body && req.body.code) || '').replace(/[^a-zA-Z0-9]/g, '');
+  if (!code) throw badRequest('Falta el código de autorización');
+  try {
+    const data = await tn.exchangeCode(code);
+    res.json({ ok: true, storeId: String(data.user_id) });
+  } catch (err) {
+    throw badRequest(`Tienda Nube rechazó el código (${err.message}). Puede haber vencido: volvé a tocar "Conectar con Tienda Nube".`);
+  }
+});
+
 router.post('/integrations/tiendanube/disconnect', (req, res) => {
   settings.set({ tn_access_token: '', tn_store_id: '' });
   res.json({ ok: true });
