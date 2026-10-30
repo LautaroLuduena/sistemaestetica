@@ -154,7 +154,7 @@ function listArticles({ q, categoryId, status } = {}) {
   const cats = new Map(db.all('SELECT * FROM categories').map((c) => [c.id, c]));
   return rows.map((a) => {
     const variants = db
-      .all('SELECT id, sku, variant_values, price, promo_price, stock, min_stock FROM products WHERE article_id = ? AND active = 1 ORDER BY id', a.id)
+      .all('SELECT id, sku, variant_values, price, promo_price, cost, stock, min_stock FROM products WHERE article_id = ? AND active = 1 ORDER BY id', a.id)
       .map((v) => ({ ...v, values: parseJson(v.variant_values, []), effective_price: effectivePrice(v) }));
     const cat = cats.get(a.category_id);
     const parent = cat && cat.parent_id ? cats.get(cat.parent_id) : null;
@@ -177,6 +177,12 @@ function listArticles({ q, categoryId, status } = {}) {
       price_max: prices.length ? Math.max(...prices) : 0,
       effective_min: eff.length ? Math.min(...eff) : 0,
       on_promo: variants.some((v) => v.effective_price < v.price),
+      missing_cost: variants.some((v) => v.cost === null || v.cost === undefined),
+      margin: (() => {
+        const withCost = variants.filter((v) => v.cost !== null && v.cost !== undefined && v.effective_price > 0);
+        if (!withCost.length) return null;
+        return Math.round((withCost.reduce((t, v) => t + (v.effective_price - v.cost) / v.effective_price, 0) / withCost.length) * 100);
+      })(),
       tn_product_id: a.tn_product_id,
       tn_sync_status: a.tn_sync_status,
       tn_sync_error: a.tn_sync_error,
@@ -219,6 +225,7 @@ function validate(input) {
     const price = optNum(v.price, 'El precio');
     if (!price) throw badRequest(attributes.length ? `Ingresá el precio de la variante ${values.join(' / ')}` : 'Ingresá el precio');
     const promo = optNum(v.promo_price, 'El precio promocional');
+    const cost = optNum(v.cost, 'El costo');
     if (promo !== null && promo > 0 && promo >= price) throw badRequest('El precio promocional tiene que ser menor al precio normal');
     const stockVal = v.stock === undefined || v.stock === '' || v.stock === null ? 0 : Number(v.stock);
     if (!Number.isInteger(stockVal) || stockVal < 0) throw badRequest('El stock tiene que ser un número entero, 0 o más');
@@ -234,6 +241,7 @@ function validate(input) {
       sku,
       price,
       promo_price: promo || null,
+      cost,
       stock: stockVal,
       weight: optNum(v.weight, 'El peso'),
     };
@@ -310,7 +318,7 @@ function saveArticle(input, { id = null, userId = null } = {}) {
         }
         const fields = [
           v.sku, displayName(data.name, v.values), JSON.stringify(v.values), v.price, v.promo_price, data.minStock,
-          v.weight || data.weight, data.width, data.height, data.depth, data.active, data.publishOnline,
+          v.weight || data.weight, data.width, data.height, data.depth, v.cost,
         ];
         const current = v.id ? existing.find((e) => e.id === v.id) : null;
         if (v.id && !current) throw badRequest('Una de las variantes no pertenece a este artículo');
@@ -318,8 +326,8 @@ function saveArticle(input, { id = null, userId = null } = {}) {
         if (current) {
           db.run(
             `UPDATE products SET sku = ?, name = ?, variant_values = ?, price = ?, promo_price = ?, min_stock = ?, weight = ?, width = ?, height = ?, depth = ?,
-                    active = 1, publish_online = ?, updated_at = datetime('now') WHERE id = ?`,
-            ...fields.slice(0, 10), data.publishOnline, current.id
+                    cost = ?, active = 1, publish_online = ?, updated_at = datetime('now') WHERE id = ?`,
+            ...fields, data.publishOnline, current.id
           );
           pid = current.id;
           if (current.stock !== v.stock) {
@@ -327,9 +335,9 @@ function saveArticle(input, { id = null, userId = null } = {}) {
           }
         } else {
           const res = db.run(
-            `INSERT INTO products (sku, name, variant_values, price, promo_price, min_stock, weight, width, height, depth, active, publish_online, article_id, tn_product_id, stock)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0)`,
-            ...fields.slice(0, 10), data.publishOnline, aid, article.tn_product_id
+            `INSERT INTO products (sku, name, variant_values, price, promo_price, min_stock, weight, width, height, depth, cost, active, publish_online, article_id, tn_product_id, stock)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0)`,
+            ...fields, data.publishOnline, aid, article.tn_product_id
           );
           pid = Number(res.lastInsertRowid);
           if (v.stock > 0) stock.change(pid, { setTo: v.stock, type: 'initial', reason: 'Alta de artículo', userId, source: 'inventory' });

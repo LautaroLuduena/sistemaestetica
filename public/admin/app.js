@@ -899,13 +899,17 @@ async function renderCashHistory(target) {
   );
 }
 
-function cashMovementModal() {
+async function cashMovementModal() {
+  if (!app.expenseCategories) app.expenseCategories = await adminApi('/api/admin/expenses/categories');
   const m = modal(`<h2>Ingreso / egreso de caja</h2><form id="f">
     <div class="grid cols-2"><label>Tipo<select name="type"><option value="expense">Egreso (pago, retiro)</option><option value="income">Ingreso</option></select></label>
     <label>Medio<select name="method">${methodOptions()}</select></label></div>
+    <label id="cat-wrap">Categoría del gasto<select name="category">${(app.expenseCategories || []).map((c) => `<option>${esc(c)}</option>`).join('')}
+      <option value="retiro">Retiro de dinero del dueño (no es gasto)</option></select></label>
     <label>Importe<input name="amount" type="number" step="0.01" min="0" required /></label>
-    <label>Descripción<input name="description" required placeholder="Ej: pago de limpieza, retiro, cambio" /></label>
+    <label>Descripción<input name="description" required placeholder="Ej: pago de limpieza, cambio" /></label>
     <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Registrar</button></div></form>`);
+  $('#f', m).type.onchange = (e) => $('#cat-wrap', m).classList.toggle('hidden', e.target.value !== 'expense');
   $('#f', m).onsubmit = async (e) => {
     e.preventDefault();
     if (await act(() => adminApi('/api/admin/cash/movements', { method: 'POST', body: formData(e.target) }), 'Movimiento registrado')) {
@@ -934,6 +938,350 @@ function closeCashModal(s) {
     if (r) {
       m.remove();
       route();
+    }
+  };
+}
+
+// ---------- Resultados ----------
+
+app.res = { preset: 'month', from: '', to: '' };
+
+function periodFor(preset) {
+  const t = today();
+  const [y, mo] = t.split('-').map(Number);
+  const pad = (n) => String(n).padStart(2, '0');
+  const lastDay = (yy, mm) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+  if (preset === 'month') return [`${y}-${pad(mo)}-01`, t];
+  if (preset === 'prev') {
+    const py = mo === 1 ? y - 1 : y;
+    const pm = mo === 1 ? 12 : mo - 1;
+    return [`${py}-${pad(pm)}-01`, `${py}-${pad(pm)}-${pad(lastDay(py, pm))}`];
+  }
+  if (preset === '30') return [addDays(t, -29), t];
+  if (preset === 'year') return [`${y}-01-01`, t];
+  return [app.res.from || `${y}-${pad(mo)}-01`, app.res.to || t];
+}
+
+function periodControls() {
+  const r = app.res;
+  return `<div class="card row">
+    <select id="preset" style="width:auto">
+      ${[['month', 'Este mes'], ['prev', 'Mes anterior'], ['30', 'Últimos 30 días'], ['year', 'Este año'], ['custom', 'Elegir fechas']]
+        .map(([k, l]) => `<option value="${k}" ${r.preset === k ? 'selected' : ''}>${l}</option>`)
+        .join('')}
+    </select>
+    <span class="row ${r.preset === 'custom' ? '' : 'hidden'}" id="custom">
+      <input type="date" id="from" value="${r.from}" style="width:auto" /> a <input type="date" id="to" value="${r.to}" style="width:auto" />
+    </span>
+    <span class="muted" id="period-label"></span>
+  </div>`;
+}
+
+function bindPeriodControls(reload) {
+  $('#preset').onchange = (e) => {
+    app.res.preset = e.target.value;
+    if (app.res.preset === 'custom') {
+      const [f, t] = periodFor('month');
+      app.res.from = app.res.from || f;
+      app.res.to = app.res.to || t;
+    }
+    reload();
+  };
+  if ($('#from')) $('#from').onchange = (e) => ((app.res.from = e.target.value), reload());
+  if ($('#to')) $('#to').onchange = (e) => ((app.res.to = e.target.value), reload());
+}
+
+VIEWS.resultados = async () => {
+  const tab = app.query.get('tab') || 'resumen';
+  $('#main').innerHTML = `<div class="page-head"><h1>Resultados</h1><button id="new-exp">+ Cargar gasto</button></div>
+    <div class="tabs">${[['resumen', 'Resumen'], ['gastos', 'Gastos']].map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+    ${periodControls()}
+    <div id="tab"><p class="muted">Calculando…</p></div>`;
+  $$('[data-tab]').forEach((b) => (b.onclick = () => (location.hash = `resultados?tab=${b.dataset.tab}`)));
+  $('#new-exp').onclick = () => expenseModal(() => VIEWS.resultados());
+  bindPeriodControls(() => VIEWS.resultados());
+  const [from, to] = periodFor(app.res.preset);
+  $('#period-label').textContent = `${fmtDate(from, { day: 'numeric', month: 'short', year: 'numeric' })} al ${fmtDate(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+  if (tab === 'gastos') return renderExpenses(from, to);
+  return renderResults(from, to);
+};
+
+const pct = (v) => (v === null || v === undefined ? '-' : `${String(v).replace('.', ',')}%`);
+
+function delta(current, previous, { invert = false } = {}) {
+  if (!previous) return '';
+  const change = ((current - previous) / Math.abs(previous)) * 100;
+  if (!Number.isFinite(change)) return '';
+  const up = change >= 0;
+  const good = invert ? !up : up;
+  return `<small style="color:${good ? 'var(--ok)' : 'var(--danger)'}">${up ? '▲' : '▼'} ${Math.abs(Math.round(change))}%</small> <small class="muted">vs. período anterior</small>`;
+}
+
+async function renderResults(from, to) {
+  const r = await adminApi(`/api/admin/reports/results?from=${from}&to=${to}`);
+  const t = r.totals;
+  const p = r.previous;
+  const tile = (label, value, sub, d) => `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div><small class="muted">${sub}</small></div>` : ''}<div>${d}</div></div>`;
+  // Sin costo cargado el margen no es real: no se muestra.
+  const marginCell = (m, missingCost = false) =>
+    missingCost ? '<span class="muted" title="Falta cargar el costo">—</span>' : m === null ? '-' : `<span class="badge ${m < 0 ? 'danger' : m < 30 ? 'warn' : 'ok'}">${pct(m)}</span>`;
+  const hasPrevious = p.revenue || p.cost || p.expenses;
+  const missing = r.extra.productsWithoutCost + r.extra.servicesWithoutCost;
+  $('#tab').innerHTML = `
+    ${
+      missing
+        ? `<div class="alert warn">Hay ${r.extra.servicesWithoutCost ? `${r.extra.servicesWithoutCost} servicio(s)` : ''}${r.extra.servicesWithoutCost && r.extra.productsWithoutCost ? ' y ' : ''}${r.extra.productsWithoutCost ? `${r.extra.productsWithoutCost} producto(s)` : ''} sin costo cargado: la ganancia aparece más alta de lo real.
+          Cargalo en ${r.extra.servicesWithoutCost ? '<a href="#config?tab=servicios">Configuración → Servicios</a>' : ''}${r.extra.servicesWithoutCost && r.extra.productsWithoutCost ? ' y ' : ''}${r.extra.productsWithoutCost ? '<a href="#inventario">Inventario</a>' : ''}.</div>`
+        : ''
+    }
+    <div class="grid kpis">
+      ${tile('Ingresos', fmtMoney(t.revenue), 'lo cobrado en el período', delta(t.revenue, p.revenue))}
+      ${tile('Costo de lo vendido', fmtMoney(t.cost), 'productos + insumos de servicios', delta(t.cost, p.cost, { invert: true }))}
+      ${tile('Ganancia bruta', fmtMoney(t.gross), `margen ${pct(t.grossMargin)}`, delta(t.gross, p.gross))}
+      ${tile('Gastos', fmtMoney(t.expenses), 'alquiler, sueldos, servicios…', delta(t.expenses, p.expenses, { invert: true }))}
+      ${tile('Ganancia neta', `<span style="color:${t.net < 0 ? 'var(--danger)' : 'inherit'}">${fmtMoney(t.net)}</span>`, `margen ${pct(t.netMargin)}`, delta(t.net, p.net))}
+    </div>
+    <p class="muted" style="margin:-0.4rem 0 1rem">${
+      hasPrevious
+        ? `Las flechas comparan con el período anterior de igual duración (${fmtDate(p.from, { day: 'numeric', month: 'short' })} al ${fmtDate(p.to, { day: 'numeric', month: 'short' })}).`
+        : 'No hay datos del período anterior para comparar.'
+    }</p>
+
+    <div class="card">
+      <div class="row between"><h2 style="margin:0">Ingresos y ganancia bruta ${r.groupBy === 'month' ? 'por mes' : 'por día'}</h2>
+        <button class="secondary small" id="as-table">Ver como tabla</button></div>
+      <div class="legend"><span><i style="background:var(--series-1)"></i>Ingresos</span><span><i style="background:var(--series-2)"></i>Ganancia bruta</span></div>
+      <div id="chart" class="chart"></div>
+      <div id="chart-table" class="hidden"></div>
+    </div>
+
+    <div class="grid split">
+      <div class="card"><h2>Por canal</h2>
+        <div class="table-wrap"><table><tr><th>Canal</th><th class="num">Ingresos</th><th class="num">Costo</th><th class="num">Ganancia</th><th class="num">Margen</th></tr>
+        ${r.channels
+          .filter((c) => c.revenue || c.cost)
+          .map((c) => `<tr><td>${esc(c.label)}</td><td class="num">${fmtMoney(c.revenue)}</td><td class="num">${fmtMoney(c.cost)}</td><td class="num">${fmtMoney(c.gross)}</td><td class="num">${marginCell(c.margin)}</td></tr>`)
+          .join('') || '<tr><td colspan="5" class="muted">Sin ventas en el período.</td></tr>'}
+        </table></div>
+      </div>
+      <div class="card"><h2>Otros datos</h2>
+        <div class="summary-line"><span>Turnos atendidos</span><b>${r.extra.appointmentsAttended}</b></div>
+        <div class="summary-line"><span>Ventas (local + web)</span><b>${r.extra.salesCount}</b></div>
+        <div class="summary-line"><span>Ticket promedio</span><b>${fmtMoney(r.extra.avgTicket)}</b></div>
+        <div class="summary-line"><span>Ventas en la tienda online</span><b>${r.extra.webOrders}</b></div>
+        ${r.extra.advanceDeposits ? `<div class="summary-line"><span>Señas cobradas de turnos futuros <small class="muted">(incluidas en ingresos)</small></span><b>${fmtMoney(r.extra.advanceDeposits)}</b></div>` : ''}
+        ${r.extra.shippingCharged ? `<div class="summary-line"><span>Envíos cobrados a clientes <small class="muted">(no se cuentan como ingreso)</small></span><b>${fmtMoney(r.extra.shippingCharged)}</b></div>` : ''}
+      </div>
+    </div>
+
+    <div class="card"><h2>Servicios</h2>
+      ${
+        r.services.length
+          ? `<div class="table-wrap"><table><tr><th>Servicio</th><th class="num">Sesiones</th><th class="num">Ingresos</th><th class="num">Costo insumos</th><th class="num">Ganancia</th><th class="num">Margen</th></tr>
+          ${r.services
+            .map(
+              (s) => `<tr><td>${esc(s.name)} ${s.missingCost ? '<span class="badge warn">sin costo</span>' : ''}</td><td class="num">${s.units}</td><td class="num">${fmtMoney(s.revenue)}</td>
+              <td class="num">${fmtMoney(s.cost)}</td><td class="num">${fmtMoney(s.gross)}</td><td class="num">${marginCell(s.margin, s.missingCost)}</td></tr>`
+            )
+            .join('')}</table></div>
+          <p class="muted" style="margin-bottom:0">Ingresos: señas y saldos cobrados en el período. Sesiones y costo: turnos atendidos en el período.</p>`
+          : '<p class="muted">Sin servicios en el período.</p>'
+      }
+    </div>
+
+    <div class="card"><h2>Productos</h2>
+      ${
+        r.products.length
+          ? `<div class="table-wrap"><table><tr><th>Producto</th><th class="num">Unidades</th><th class="num">Ingresos</th><th class="num">Costo</th><th class="num">Ganancia</th><th class="num">Margen</th></tr>
+          ${r.products
+            .map(
+              (x) => `<tr><td>${esc(x.name)} ${x.missingCost ? '<span class="badge warn">sin costo</span>' : ''}</td>
+              <td class="num">${x.units}${x.localUnits && x.webUnits ? `<br><small class="muted">${x.localUnits} local · ${x.webUnits} web</small>` : x.webUnits ? '<br><small class="muted">web</small>' : ''}</td>
+              <td class="num">${fmtMoney(x.revenue)}</td><td class="num">${x.missingCost && !x.cost ? '<span class="muted">sin cargar</span>' : fmtMoney(x.cost)}</td><td class="num">${fmtMoney(x.gross)}</td><td class="num">${marginCell(x.margin, x.missingCost)}</td></tr>`
+            )
+            .join('')}</table></div>`
+          : '<p class="muted">Sin productos vendidos en el período.</p>'
+      }
+    </div>
+
+    <div class="card"><div class="row between"><h2 style="margin:0">Gastos por categoría</h2><a href="#resultados?tab=gastos">Ver detalle</a></div>
+      ${
+        r.expensesByCategory.length
+          ? `<div class="table-wrap"><table><tr><th>Categoría</th><th class="num">Importe</th><th class="num">% de los gastos</th></tr>
+          ${r.expensesByCategory
+            .map((e) => `<tr><td>${esc(e.category)}</td><td class="num">${fmtMoney(e.amount)}</td><td class="num">${t.expenses ? Math.round((e.amount / t.expenses) * 100) : 0}%</td></tr>`)
+            .join('')}</table></div>`
+          : '<p class="muted">No hay gastos cargados en el período. Cargalos con "+ Cargar gasto" para ver la ganancia neta real.</p>'
+      }
+    </div>`;
+  drawResultsChart($('#chart'), r.series, r.groupBy);
+  $('#as-table').onclick = () => {
+    const tableEl = $('#chart-table');
+    const showing = !tableEl.classList.contains('hidden');
+    tableEl.classList.toggle('hidden', showing);
+    $('#chart').classList.toggle('hidden', !showing);
+    $('#as-table').textContent = showing ? 'Ver como tabla' : 'Ver gráfico';
+    if (!showing) {
+      tableEl.innerHTML = `<div class="table-wrap"><table><tr><th>${r.groupBy === 'month' ? 'Mes' : 'Día'}</th><th class="num">Ingresos</th><th class="num">Ganancia bruta</th><th class="num">Ganancia neta</th></tr>
+        ${r.series.map((s) => `<tr><td>${esc(bucketLabel(s.key, r.groupBy, true))}</td><td class="num">${fmtMoney(s.revenue)}</td><td class="num">${fmtMoney(s.gross)}</td><td class="num">${fmtMoney(s.net)}</td></tr>`).join('')}</table></div>`;
+    }
+  };
+}
+
+function bucketLabel(key, groupBy, long = false) {
+  if (groupBy === 'month') {
+    const s = new Date(`${key}-15T12:00:00`).toLocaleDateString('es-AR', { month: long ? 'long' : 'short', year: long ? 'numeric' : '2-digit' });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  return long ? fmtDate(key, { weekday: 'short', day: 'numeric', month: 'short' }) : String(Number(key.slice(8)));
+}
+
+const compactMoney = (n) => {
+  const a = Math.abs(n);
+  if (a >= 1e6) return `$${(n / 1e6).toFixed(a >= 1e7 ? 0 : 1).replace('.', ',')}M`;
+  if (a >= 1e3) return `$${Math.round(n / 1e3)}k`;
+  return `$${Math.round(n)}`;
+};
+
+// Barras agrupadas (Ingresos / Ganancia bruta) en SVG, con tooltip por grupo.
+function drawResultsChart(el, series, groupBy) {
+  if (!series.some((s) => s.revenue || s.gross)) {
+    el.innerHTML = '<p class="muted">Sin movimientos en el período.</p>';
+    return;
+  }
+  const W = 900;
+  const H = 260;
+  const pad = { l: 56, r: 12, t: 12, b: 28 };
+  const values = series.flatMap((s) => [s.revenue, s.gross]);
+  const max = Math.max(0, ...values);
+  const min = Math.min(0, ...values);
+  const niceStep = (range) => {
+    const raw = range / 4;
+    const mag = 10 ** Math.floor(Math.log10(raw || 1));
+    return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || raw;
+  };
+  const step = niceStep(max - min || 1);
+  const top = Math.ceil(max / step) * step || step;
+  const bottom = Math.floor(min / step) * step;
+  const y = (v) => pad.t + ((top - v) / (top - bottom)) * (H - pad.t - pad.b);
+  const plotW = W - pad.l - pad.r;
+  const slot = plotW / series.length;
+  const barW = Math.max(2, Math.min(18, (slot - 6) / 2));
+  const ticks = [];
+  for (let v = bottom; v <= top + 1e-6; v += step) ticks.push(v);
+  const labelEvery = Math.ceil(series.length / 16);
+  const bar = (x, v, color) => {
+    const y0 = y(0);
+    const y1 = y(v);
+    const h = Math.max(Math.abs(y1 - y0), v ? 1 : 0);
+    return `<rect x="${x.toFixed(1)}" y="${Math.min(y0, y1).toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${color}" />`;
+  };
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Ingresos y ganancia bruta">
+    ${ticks.map((v) => `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}" class="${v === 0 ? 'axis' : 'grid'}" /><text x="${pad.l - 8}" y="${y(v) + 4}" text-anchor="end" class="tick">${compactMoney(v)}</text>`).join('')}
+    ${series
+      .map((s, i) => {
+        const cx = pad.l + slot * i + slot / 2;
+        return `<g class="grp" data-i="${i}">
+          <rect class="hit" x="${pad.l + slot * i}" y="${pad.t}" width="${slot}" height="${H - pad.t - pad.b}" />
+          ${bar(cx - barW - 1, s.revenue, 'var(--series-1)')}${bar(cx + 1, s.gross, 'var(--series-2)')}
+          ${i % labelEvery === 0 ? `<text x="${cx}" y="${H - 8}" text-anchor="middle" class="tick">${esc(bucketLabel(s.key, groupBy))}</text>` : ''}
+        </g>`;
+      })
+      .join('')}
+  </svg><div class="chart-tip hidden"></div>`;
+  const tip = $('.chart-tip', el);
+  $$('.grp', el).forEach((g) => {
+    const show = () => {
+      const s = series[Number(g.dataset.i)];
+      $$('.grp', el).forEach((x) => x.classList.toggle('dim', x !== g));
+      tip.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'tip-title';
+      title.textContent = bucketLabel(s.key, groupBy, true);
+      tip.appendChild(title);
+      for (const [label, value, color] of [['Ingresos', s.revenue, 'var(--series-1)'], ['Ganancia bruta', s.gross, 'var(--series-2)'], ['Ganancia neta', s.net, null]]) {
+        const row = document.createElement('div');
+        row.className = 'tip-row';
+        const key = document.createElement('span');
+        if (color) {
+          const sw = document.createElement('i');
+          sw.style.background = color;
+          key.appendChild(sw);
+        }
+        key.appendChild(document.createTextNode(label));
+        const val = document.createElement('b');
+        val.textContent = fmtMoney(value);
+        row.append(val, key);
+        tip.appendChild(row);
+      }
+      tip.classList.remove('hidden');
+      const box = el.getBoundingClientRect();
+      const gb = g.getBoundingClientRect();
+      const left = gb.left - box.left + gb.width / 2;
+      tip.style.left = `${Math.min(Math.max(left, 90), box.width - 90)}px`;
+    };
+    g.addEventListener('pointerenter', show);
+    g.addEventListener('focus', show);
+    g.setAttribute('tabindex', '0');
+  });
+  el.addEventListener('pointerleave', () => {
+    tip.classList.add('hidden');
+    $$('.grp', el).forEach((x) => x.classList.remove('dim'));
+  });
+}
+
+async function renderExpenses(from, to) {
+  const { expenses, categories } = await adminApi(`/api/admin/expenses?from=${from}&to=${to}`);
+  app.expenseCategories = categories;
+  const total = expenses.reduce((t, e) => t + e.amount, 0);
+  $('#tab').innerHTML = `<div class="card">
+    <div class="row between"><h2 style="margin:0">Gastos del período</h2><b>${fmtMoney(total)}</b></div>
+    <p class="muted">La compra de mercadería no se carga acá: su costo ya se cuenta cuando se vende cada producto (cargá el costo en el Inventario).
+      Los egresos de caja con categoría aparecen acá automáticamente.</p>
+    ${
+      expenses.length
+        ? `<div class="table-wrap"><table><tr><th>Fecha</th><th>Categoría</th><th>Descripción</th><th>Medio</th><th class="num">Importe</th><th></th></tr>
+        ${expenses
+          .map(
+            (e) => `<tr><td>${fmtDate(e.date, { day: '2-digit', month: '2-digit', year: '2-digit' })}</td><td>${esc(e.category)}</td><td>${esc(e.description || '')}</td>
+            <td>${esc(METHOD_LABELS[e.payment_method] || e.payment_method || '')}${e.cash_movement_id ? ' <span class="badge info">caja</span>' : ''}</td>
+            <td class="num">${fmtMoney(e.amount)}</td><td><button class="danger small" data-del="${e.id}">Borrar</button></td></tr>`
+          )
+          .join('')}</table></div>`
+        : '<p class="muted">No hay gastos cargados en este período.</p>'
+    }</div>`;
+  $$('[data-del]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        if (!confirm('¿Borrar este gasto? Si salió de la caja, el dinero vuelve a la caja.')) return;
+        if (await act(() => adminApi(`/api/admin/expenses/${b.dataset.del}`, { method: 'DELETE' }), 'Gasto borrado')) VIEWS.resultados();
+      })
+  );
+}
+
+async function expenseModal(onSaved) {
+  if (!app.expenseCategories) app.expenseCategories = await adminApi('/api/admin/expenses/categories');
+  const m = modal(`<h2>Cargar gasto</h2><form id="ef">
+    <div class="grid cols-2">
+      <label>Fecha<input type="date" name="date" value="${today()}" required /></label>
+      <label>Categoría<select name="category">${app.expenseCategories.map((c) => `<option>${esc(c)}</option>`).join('')}</select></label>
+    </div>
+    <label>Descripción<input name="description" placeholder="Ej: alquiler de noviembre, sueldo de Sofía, luz" /></label>
+    <div class="grid cols-2">
+      <label>Importe<input name="amount" type="number" min="0" step="0.01" required /></label>
+      <label>Medio de pago<select name="method">${methodOptions('transferencia')}</select></label>
+    </div>
+    <label class="check"><input type="checkbox" name="fromCash" /> Lo pagué con plata de la caja (descuenta de la caja abierta)</label>
+    <p class="muted">La compra de mercadería para vender no es un gasto: su costo se toma del Inventario cuando se vende.</p>
+    <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Guardar gasto</button></div></form>`);
+  const f = $('#ef', m);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = formData(f);
+    body.fromCash = f.fromCash.checked;
+    if (await act(() => adminApi('/api/admin/expenses', { method: 'POST', body }), 'Gasto cargado')) {
+      m.remove();
+      onSaved();
     }
   };
 }
@@ -1222,7 +1570,7 @@ async function renderArticles() {
               ${a.variants.length > 1 ? `<br><small class="muted">${a.variants.length} variantes: ${esc(a.variants.map((v) => v.values.join(' / ')).join(', '))}</small>` : a.variants[0] && a.variants[0].sku ? `<br><small class="muted">SKU ${esc(a.variants[0].sku)}</small>` : ''}
               ${a.active ? '' : ' <span class="badge gray">inactivo</span>'}${a.image_count ? '' : ' <span class="badge warn">falta foto</span>'}</td>
             <td><small>${esc(a.category || '-')}</small></td>
-            <td class="num">${priceCell(a)}</td>
+            <td class="num">${priceCell(a)}<br>${a.missing_cost ? '<span class="badge warn" title="Cargá el costo para ver la ganancia en Resultados">sin costo</span>' : a.margin !== null ? `<small class="muted">margen ${a.margin}%</small>` : ''}</td>
             <td class="num"><span class="badge ${a.stock <= 0 ? 'danger' : a.low_stock ? 'warn' : 'ok'}">${a.stock}</span></td>
             <td>${onlineBadge(a, tnConnected)}</td>
             <td style="white-space:nowrap"><button class="small" data-edit="${a.id}">Editar</button>
@@ -1354,7 +1702,7 @@ async function articleModal(a = null) {
     hasVariants: a ? a.attributes.length > 0 : false,
     attributes: a && a.attributes.length ? [...a.attributes] : [''],
     variants: a
-      ? a.variants.map((v) => ({ id: v.id, values: [...v.values], sku: v.sku || '', price: v.price, promo_price: v.promo_price || '', stock: v.stock, weight: v.weight && v.weight !== a.weight ? v.weight : '' }))
+      ? a.variants.map((v) => ({ id: v.id, values: [...v.values], sku: v.sku || '', price: v.price, promo_price: v.promo_price || '', cost: v.cost ?? '', stock: v.stock, weight: v.weight && v.weight !== a.weight ? v.weight : '' }))
       : [{ values: [], sku: '', price: '', promo_price: '', stock: 0, weight: '' }],
   };
   const top = a && a.category ? a.category.id : '';
@@ -1485,6 +1833,16 @@ async function articleModal(a = null) {
     });
     $$('[data-attr]', m).forEach((inp) => (st.attributes[Number(inp.dataset.attr)] = inp.value));
   };
+  // Muestra el margen del artículo simple mientras se cargan precio y costo.
+  function updateMarginHint() {
+    const hint = $('.margin-hint', m);
+    if (!hint) return;
+    const val = (k) => Number(($(`[data-vf="${k}"][data-row="0"]`, m) || {}).value) || 0;
+    const price = val('promo_price') && val('promo_price') < val('price') ? val('promo_price') : val('price');
+    const cost = val('cost');
+    hint.textContent = price && cost ? `Ganancia por unidad: ${fmtMoney(price - cost)} (${Math.round(((price - cost) / price) * 100)}%)` : '';
+  }
+  m.addEventListener('input', (e) => e.target.matches('[data-vf]') && updateMarginHint());
   const renderVariants = () => {
     const box = $('#variants-box', m);
     if (!st.hasVariants) {
@@ -1493,9 +1851,12 @@ async function articleModal(a = null) {
       box.innerHTML = `<div class="grid cols-4">
         <label>Precio *<input type="number" min="0" step="0.01" data-vf="price" data-row="0" value="${esc(v.price)}" /></label>
         <label>Precio promocional<input type="number" min="0" step="0.01" data-vf="promo_price" data-row="0" value="${esc(v.promo_price)}" placeholder="opcional" /></label>
+        <label>Costo<input type="number" min="0" step="0.01" data-vf="cost" data-row="0" value="${esc(v.cost)}" placeholder="lo que te cuesta" /></label>
         <label>Stock<input type="number" min="0" step="1" data-vf="stock" data-row="0" value="${esc(v.stock)}" /></label>
-        <label>SKU / código<input data-vf="sku" data-row="0" value="${esc(v.sku)}" placeholder="opcional" /></label>
-      </div>`;
+      </div>
+      <div class="grid cols-4"><label>SKU / código<input data-vf="sku" data-row="0" value="${esc(v.sku)}" placeholder="opcional" /></label>
+        <div class="muted margin-hint" style="align-self:center"></div></div>`;
+      updateMarginHint();
       return;
     }
     const attrs = st.attributes;
@@ -1518,13 +1879,14 @@ async function articleModal(a = null) {
       </div>
       <p class="muted">2. Completá precio y stock de cada variante.</p>
       <div class="table-wrap"><table class="variants">
-        <tr>${attrs.map((x) => `<th>${esc(x || 'Variante')}</th>`).join('')}<th>Precio *</th><th>Promocional</th><th>Stock</th><th>SKU</th><th>Peso (kg)</th><th></th></tr>
+        <tr>${attrs.map((x) => `<th>${esc(x || 'Variante')}</th>`).join('')}<th>Precio *</th><th>Promocional</th><th>Costo</th><th>Stock</th><th>SKU</th><th>Peso (kg)</th><th></th></tr>
         ${st.variants
           .map(
             (v, i) => `<tr>
             ${attrs.map((_, k) => `<td><input data-vf="value" data-k="${k}" data-row="${i}" value="${esc(v.values[k] || '')}" /></td>`).join('')}
             <td><input type="number" min="0" step="0.01" data-vf="price" data-row="${i}" value="${esc(v.price)}" /></td>
             <td><input type="number" min="0" step="0.01" data-vf="promo_price" data-row="${i}" value="${esc(v.promo_price)}" /></td>
+            <td><input type="number" min="0" step="0.01" data-vf="cost" data-row="${i}" value="${esc(v.cost)}" /></td>
             <td><input type="number" min="0" step="1" data-vf="stock" data-row="${i}" value="${esc(v.stock)}" style="width:70px" /></td>
             <td><input data-vf="sku" data-row="${i}" value="${esc(v.sku)}" /></td>
             <td><input type="number" min="0" step="0.001" data-vf="weight" data-row="${i}" value="${esc(v.weight)}" placeholder="igual" style="width:80px" /></td>
@@ -1534,7 +1896,7 @@ async function articleModal(a = null) {
       </table></div>
       <div class="row" style="margin-top:0.5rem">
         <button type="button" class="secondary small" id="add-row">+ Agregar variante</button>
-        ${st.variants.length > 1 ? '<button type="button" class="secondary small" id="copy-price">Copiar precio de la primera a todas</button>' : ''}
+        ${st.variants.length > 1 ? '<button type="button" class="secondary small" id="copy-price">Copiar precio y costo de la primera a todas</button>' : ''}
       </div>`;
     const on = (sel, fn) => $(sel, m) && ($(sel, m).onclick = fn);
     on('#add-attr', () => (readVariantInputs(), st.attributes.push(''), renderVariants()));
@@ -1561,7 +1923,7 @@ async function articleModal(a = null) {
       const existing = new Map(st.variants.filter((v) => v.values.length).map((v) => [key(v.values), v]));
       const first = st.variants[0] || st.seed || {};
       st.variants = combinations(lists).map(
-        (vals) => existing.get(key(vals)) || { values: vals, sku: '', price: first.price || '', promo_price: '', stock: 0, weight: '' }
+        (vals) => existing.get(key(vals)) || { values: vals, sku: '', price: first.price || '', promo_price: '', cost: first.cost ?? '', stock: 0, weight: '' }
       );
       renderVariants();
     });
@@ -1571,6 +1933,7 @@ async function articleModal(a = null) {
       st.variants.forEach((v) => {
         v.price = st.variants[0].price;
         v.promo_price = st.variants[0].promo_price;
+        v.cost = st.variants[0].cost;
       });
       renderVariants();
     });
@@ -1626,6 +1989,7 @@ async function articleModal(a = null) {
         sku: v.sku,
         price: v.price,
         promo_price: v.promo_price,
+        cost: v.cost,
         stock: v.stock,
         weight: v.weight,
       })),
@@ -1883,10 +2247,12 @@ const CONFIG_TABS = {
     const list = await loadServices();
     $('#tab').innerHTML = `<div class="card"><div class="row between"><h2>Servicios</h2><button id="new">+ Nuevo servicio</button></div>
       <p class="muted">La seña es lo que se cobra por Mercado Pago al reservar online. Si es 0, el turno se confirma sin pago.</p>
-      <div class="table-wrap"><table><tr><th>Servicio</th><th class="num">Duración</th><th class="num">Precio</th><th class="num">Seña</th><th>Estado</th><th></th></tr>
+      <div class="table-wrap"><table><tr><th>Servicio</th><th class="num">Duración</th><th class="num">Precio</th><th class="num">Seña</th><th class="num">Costo</th><th class="num">Margen</th><th>Estado</th><th></th></tr>
       ${list
         .map(
           (s) => `<tr><td>${esc(s.name)}</td><td class="num">${s.duration_min} min</td><td class="num">${fmtMoney(s.price)}</td><td class="num">${fmtMoney(s.deposit_amount)}</td>
+          <td class="num">${s.cost === null || s.cost === undefined ? '<span class="badge warn">sin costo</span>' : fmtMoney(s.cost)}</td>
+          <td class="num">${s.cost === null || s.cost === undefined || !s.price ? '-' : `${Math.round(((s.price - s.cost) / s.price) * 100)}%`}</td>
           <td>${s.active ? '<span class="badge ok">Activo</span>' : '<span class="badge gray">Inactivo</span>'}</td>
           <td><button class="secondary small" data-edit="${s.id}">Editar</button></td></tr>`
         )
@@ -1898,6 +2264,7 @@ const CONFIG_TABS = {
         <div class="grid cols-3"><label>Duración (min)<input name="duration_min" type="number" min="5" step="5" required value="${s?.duration_min ?? 30}" /></label>
         <label>Precio<input name="price" type="number" step="0.01" min="0" required value="${s?.price ?? ''}" /></label>
         <label>Seña<input name="deposit_amount" type="number" step="0.01" min="0" value="${s?.deposit_amount ?? 0}" /></label></div>
+        <label>Costo por sesión (insumos: solución, descartables…)<input name="cost" type="number" step="0.01" min="0" value="${s?.cost ?? ''}" placeholder="Para calcular la ganancia en Resultados" /></label>
         <label>Orden<input name="sort" type="number" value="${s?.sort ?? 0}" /></label>
         <label class="check"><input type="checkbox" name="active" ${!s || s.active ? 'checked' : ''} /> Disponible para reservar</label>
         <div class="actions">${s ? '<button type="button" class="danger" id="del">Eliminar</button>' : ''}<button type="button" class="secondary" data-close>Cancelar</button><button>Guardar</button></div></form>`);

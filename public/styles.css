@@ -1,4 +1,6 @@
 :root {
+  --series-1: #2a78d6; /* gráficos: paleta validada (daltonismo y contraste) */
+  --series-2: #eb6834;
   --bg: #faf6f2;
   --surface: #ffffff;
   --text: #2b2420;
@@ -300,3 +302,24 @@ table.variants input { padding: 0.35em 0.45em; min-width: 70px; }
 .cat-row { border-bottom: 1px solid var(--border); padding: 0.6rem 0; }
 .cat-sub { padding: 0.35rem 0 0.35rem 1.2rem; }
 label .link { font-size: 0.8rem; margin-left: 0.4rem; }
+
+/* Resultados */
+.kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.grid.split { grid-template-columns: 1.7fr 1fr; }
+@media (max-width: 1100px) { .grid.split { grid-template-columns: 1fr; } }
+.kpis .stat .value { font-size: 1.35rem; }
+.legend { display: flex; gap: 1rem; margin: 0.6rem 0; font-size: 0.85rem; color: var(--muted); }
+.legend i, .chart-tip i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.chart { position: relative; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--border); stroke-width: 1; }
+.chart .axis { stroke: #b9aea4; stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; }
+.chart .hit { fill: transparent; }
+.chart .grp:hover .hit, .chart .grp:focus .hit { fill: rgba(176, 112, 60, 0.06); }
+.chart .grp.dim rect:not(.hit) { opacity: 0.45; }
+.chart .grp:focus { outline: none; }
+.chart-tip { position: absolute; top: 8px; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.85rem; pointer-events: none; min-width: 170px; }
+.chart-tip .tip-title { color: var(--muted); margin-bottom: 0.25rem; }
+.chart-tip .tip-row { display: flex; justify-content: space-between; gap: 0.8rem; flex-direction: row-reverse; }

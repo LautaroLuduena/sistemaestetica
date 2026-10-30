@@ -55,6 +55,43 @@ function nowInTz(timezone) {
   return { date: `${p.year}-${p.month}-${p.day}`, minutes: Number(p.hour) * 60 + Number(p.minute) };
 }
 
+// Diferencia en minutos entre la hora local de la zona y UTC en un instante (ej. -180 para Argentina).
+function tzOffsetMinutes(timezone, ms) {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(ms))
+      .map((x) => [x.type, x.value])
+  );
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60000);
+}
+
+// Rango de días locales [from, to] expresado en timestamps UTC de SQLite.
+function utcRange(from, to, timezone) {
+  const toSql = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
+  const startGuess = Date.parse(`${from}T00:00:00Z`);
+  const endGuess = Date.parse(`${addDays(to, 1)}T00:00:00Z`);
+  const start = startGuess - tzOffsetMinutes(timezone, startGuess) * 60000;
+  const end = endGuess - tzOffsetMinutes(timezone, endGuess) * 60000 - 1000;
+  return [toSql(start), toSql(end)];
+}
+
+// Fecha local (YYYY-MM-DD) de un timestamp UTC de SQLite.
+function localDateOf(sqlUtc, timezone) {
+  if (!sqlUtc) return null;
+  const ms = Date.parse(`${String(sqlUtc).replace(' ', 'T')}Z`);
+  return new Date(ms + tzOffsetMinutes(timezone, ms) * 60000).toISOString().slice(0, 10);
+}
+
 function addDays(dateStr, days) {
   const d = new Date(`${dateStr}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -83,6 +120,9 @@ module.exports = {
   fromMinutes,
   nowInTz,
   addDays,
+  tzOffsetMinutes,
+  utcRange,
+  localDateOf,
   weekday,
   sqlNow,
   token,

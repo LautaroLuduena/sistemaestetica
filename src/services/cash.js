@@ -170,7 +170,7 @@ function buildItems(items) {
       const quantity = int(it.quantity ?? 1);
       if (quantity <= 0) throw badRequest('La cantidad debe ser mayor a cero');
       const unit = it.unitPrice !== undefined && it.unitPrice !== null && it.unitPrice !== '' ? money(it.unitPrice, 'precio') : effectivePrice(p);
-      return { product_id: p.id, description: p.name, quantity, unit_price: unit, subtotal: round2(unit * quantity) };
+      return { product_id: p.id, description: p.name, quantity, unit_price: unit, subtotal: round2(unit * quantity), unit_cost: p.cost ?? null };
     }
     if (it.appointmentId) {
       const a = agenda.getAppointment(it.appointmentId);
@@ -191,7 +191,7 @@ function buildItems(items) {
       const quantity = int(it.quantity ?? 1);
       if (quantity <= 0) throw badRequest('La cantidad debe ser mayor a cero');
       const unit = it.unitPrice !== undefined && it.unitPrice !== null && it.unitPrice !== '' ? money(it.unitPrice, 'precio') : s.price;
-      return { service_id: s.id, description: s.name, quantity, unit_price: unit, subtotal: round2(unit * quantity) };
+      return { service_id: s.id, description: s.name, quantity, unit_price: unit, subtotal: round2(unit * quantity), unit_cost: s.cost ?? null };
     }
     const description = String(it.description || '').trim();
     if (!description) throw badRequest('Falta la descripción del ítem');
@@ -241,8 +241,8 @@ function createSale({ items, discount = 0, method, clientId = null, notes = null
     const saleId = Number(res.lastInsertRowid);
     for (const l of lines) {
       db.run(
-        `INSERT INTO sale_items (sale_id, product_id, service_id, appointment_id, description, quantity, unit_price, subtotal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sale_items (sale_id, product_id, service_id, appointment_id, description, quantity, unit_price, subtotal, unit_cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         saleId,
         l.product_id ?? null,
         l.service_id ?? null,
@@ -250,7 +250,8 @@ function createSale({ items, discount = 0, method, clientId = null, notes = null
         l.description,
         l.quantity,
         l.unit_price,
-        l.subtotal
+        l.subtotal,
+        l.unit_cost ?? null
       );
     }
     if (!isLink) finalizeSale(saleId, { userId });

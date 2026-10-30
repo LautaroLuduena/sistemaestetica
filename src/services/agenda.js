@@ -210,6 +210,8 @@ function createWebBooking({ serviceId, date, time, name, phone, email, notes }) 
       String(notes || '').trim() || null,
       needsDeposit ? sqlNow(holdMs) : null
     );
+    // Costo de insumos del servicio al momento del turno (para el informe de resultados).
+    db.run('UPDATE appointments SET service_cost = (SELECT cost FROM services WHERE id = service_id) WHERE id = ?', Number(result.lastInsertRowid));
     return getAppointment(Number(result.lastInsertRowid));
   });
 }
@@ -247,6 +249,8 @@ function createManual({ serviceId, date, time, clientId, name, phone, email, not
       deposit,
       String(notes || '').trim() || null
     );
+    // Costo de insumos del servicio al momento del turno (para el informe de resultados).
+    db.run('UPDATE appointments SET service_cost = (SELECT cost FROM services WHERE id = service_id) WHERE id = ?', Number(result.lastInsertRowid));
     return getAppointment(Number(result.lastInsertRowid));
   });
 }

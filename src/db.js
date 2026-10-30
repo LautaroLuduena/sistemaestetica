@@ -287,6 +287,20 @@ CREATE TABLE IF NOT EXISTS web_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_web_orders_ordered ON web_orders(ordered_at);
 
+-- Gastos del negocio (alquiler, sueldos, servicios...). Si se pagaron desde la caja quedan vinculados al movimiento.
+CREATE TABLE IF NOT EXISTS expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  description TEXT,
+  amount REAL NOT NULL,
+  payment_method TEXT,
+  cash_movement_id INTEGER REFERENCES cash_movements(id),
+  user_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
+
 CREATE TABLE IF NOT EXISTS integration_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   integration TEXT NOT NULL,
@@ -321,6 +335,11 @@ const MIGRATIONS = [
   ['products', 'width', 'REAL'],
   ['products', 'height', 'REAL'],
   ['products', 'depth', 'REAL'],
+  // Costos para el informe de resultados (se guarda una "foto" del costo en cada venta/turno).
+  ['products', 'cost', 'REAL'],
+  ['services', 'cost', 'REAL'],
+  ['sale_items', 'unit_cost', 'REAL'],
+  ['appointments', 'service_cost', 'REAL'],
 ];
 
 function migrate(conn) {

@@ -12,6 +12,8 @@ const tn = require('../services/tiendanube');
 const whatsapp = require('../services/whatsapp');
 const weborders = require('../services/weborders');
 const inventory = require('../services/inventory');
+const expenses = require('../services/expenses');
+const reports = require('../services/reports');
 const { recent } = require('../services/log');
 const { badRequest, notFound, conflict, money, int, requireText, isDate, isTime, nowInTz } = require('../util');
 
@@ -58,6 +60,7 @@ function serviceInput(body) {
     duration_min: duration,
     price,
     deposit_amount: deposit,
+    cost: body.cost === undefined || body.cost === null || body.cost === '' ? null : money(body.cost, 'costo'),
     active: body.active === false || body.active === 0 ? 0 : 1,
     sort: Number(body.sort) || 0,
   };
@@ -68,8 +71,8 @@ router.get('/services', (req, res) => res.json(db.all('SELECT * FROM services OR
 router.post('/services', (req, res) => {
   const s = serviceInput(req.body);
   const r = db.run(
-    'INSERT INTO services (name, description, duration_min, price, deposit_amount, active, sort) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    s.name, s.description, s.duration_min, s.price, s.deposit_amount, s.active, s.sort
+    'INSERT INTO services (name, description, duration_min, price, deposit_amount, cost, active, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    s.name, s.description, s.duration_min, s.price, s.deposit_amount, s.cost, s.active, s.sort
   );
   res.status(201).json(db.one('SELECT * FROM services WHERE id = ?', Number(r.lastInsertRowid)));
 });
@@ -77,8 +80,8 @@ router.post('/services', (req, res) => {
 router.put('/services/:id', (req, res) => {
   const s = serviceInput(req.body);
   const r = db.run(
-    'UPDATE services SET name = ?, description = ?, duration_min = ?, price = ?, deposit_amount = ?, active = ?, sort = ? WHERE id = ?',
-    s.name, s.description, s.duration_min, s.price, s.deposit_amount, s.active, s.sort, Number(req.params.id)
+    'UPDATE services SET name = ?, description = ?, duration_min = ?, price = ?, deposit_amount = ?, cost = ?, active = ?, sort = ? WHERE id = ?',
+    s.name, s.description, s.duration_min, s.price, s.deposit_amount, s.cost, s.active, s.sort, Number(req.params.id)
   );
   if (!r.changes) throw notFound();
   res.json(db.one('SELECT * FROM services WHERE id = ?', Number(req.params.id)));
@@ -345,7 +348,17 @@ router.post('/cash/open', (req, res) => res.status(201).json(cash.openSession({ 
 
 router.post('/cash/close', (req, res) => res.json(cash.closeSession({ countedAmount: req.body.countedAmount, notes: req.body.notes }, uid(req))));
 
-router.post('/cash/movements', (req, res) => res.status(201).json({ id: cash.manualMovement(req.body || {}, uid(req)) }));
+router.post('/cash/movements', (req, res) => {
+  const body = req.body || {};
+  const id = db.tx(() => {
+    const movementId = cash.manualMovement(body, uid(req));
+    // Los egresos de caja también quedan como gasto, con su categoría (salvo los retiros del dueño, que no son gasto).
+    if (body.type === 'expense' && body.category === 'retiro') db.run(`UPDATE cash_movements SET reference = 'retiro' WHERE id = ?`, movementId);
+    else if (body.type === 'expense') expenses.fromCashMovement(movementId, body, uid(req));
+    return movementId;
+  });
+  res.status(201).json({ id });
+});
 
 router.get('/cash/sessions', (req, res) => res.json(cash.sessions()));
 
@@ -409,6 +422,22 @@ router.post('/web-orders/sync', async (req, res) => res.json(await weborders.syn
 router.get('/web-orders/:id', (req, res) => res.json(weborders.get(Number(req.params.id))));
 
 router.post('/web-orders/:id/verify-payment', async (req, res) => res.json(await weborders.verifyPayment(Number(req.params.id))));
+
+// ---------- Resultados y gastos ----------
+
+router.get('/reports/results', (req, res) => res.json(reports.build(String(req.query.from || ''), String(req.query.to || ''))));
+
+router.get('/expenses', (req, res) => {
+  const { from, to } = req.query;
+  if (!isDate(from) || !isDate(to)) throw badRequest('Período inválido');
+  res.json({ expenses: expenses.list({ from, to }), categories: expenses.CATEGORIES });
+});
+
+router.get('/expenses/categories', (req, res) => res.json(expenses.CATEGORIES));
+
+router.post('/expenses', (req, res) => res.status(201).json(expenses.create(req.body || {}, uid(req))));
+
+router.delete('/expenses/:id', (req, res) => res.json(expenses.remove(Number(req.params.id))));
 
 // ---------- Configuración ----------
 

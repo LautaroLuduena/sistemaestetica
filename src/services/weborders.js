@@ -49,7 +49,19 @@ function mapItems(order) {
       tn_variant_id: p.variant_id ? String(p.variant_id) : null,
       product_id: local ? local.id : null,
       product_name: local ? local.name : null,
+      unit_cost: local && local.cost !== null && local.cost !== undefined ? local.cost : null,
     };
+  });
+}
+
+// Al actualizar una orden se conserva el costo que tenía cada producto cuando se vendió.
+function keepCosts(items, tnOrderId) {
+  const prev = db.one('SELECT items FROM web_orders WHERE tn_order_id = ?', tnOrderId);
+  if (!prev) return items;
+  const old = JSON.parse(prev.items || '[]');
+  return items.map((it, i) => {
+    const before = old.find((o) => o.tn_variant_id && o.tn_variant_id === it.tn_variant_id) || old[i];
+    return before && before.unit_cost !== null && before.unit_cost !== undefined ? { ...it, unit_cost: before.unit_cost } : it;
   });
 }
 
@@ -101,7 +113,7 @@ function save(order) {
     total: num(order.total),
     customer_note: order.note || null,
     owner_note: order.owner_note || null,
-    items: JSON.stringify(mapItems(order)),
+    items: JSON.stringify(keepCosts(mapItems(order), String(order.id))),
     raw: JSON.stringify(order),
     stock_status: stockStatus,
     ordered_at: toSql(order.created_at),

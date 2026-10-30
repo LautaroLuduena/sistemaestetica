@@ -7,6 +7,7 @@ Sistema web para un centro de estética / bronceado con:
 - **Inventario**: categorías y subcategorías, artículos con marca, descripción, 1 a 3 fotos, precio y precio promocional, peso y medidas, y variantes (tamaño, color, etc.). Ajustes de stock (entrada, salida/rotura, conteo físico), historial de movimientos, alertas de stock mínimo y descuentos por porcentaje. Sin módulo de compras.
 - **Caja**: apertura/cierre con arqueo, ventas de productos y servicios, cobro del saldo de los turnos, señas, ingresos/egresos, y cobro con **link/QR de Mercado Pago**.
 - **Tienda Nube**: los productos y el stock se replican en la tienda online, y las ventas de la web descuentan el stock del sistema.
+- **Resultados**: ingresos, costo de lo vendido, ganancia bruta, gastos y ganancia neta por período, con detalle por servicio, por producto, por canal y por categoría de gasto.
 
 ## Requisitos
 
@@ -129,6 +130,19 @@ Cada venta de Tienda Nube aparece en la sección **Ventas web** con todo lo nece
 
 Las ventas llegan al instante por webhook (`order/created`, `order/paid`, `order/updated`, `order/packed`, `order/fulfilled`, `order/cancelled`) y, como respaldo, el sistema consulta Tienda Nube cada 5 minutos. La primera sincronización trae los últimos 30 días como historial **sin mover el stock**. Las ventas web no se suman a la caja del local (se cobran online).
 
+## Resultados (ganancias)
+
+La sección **Resultados** muestra, para el período elegido (este mes, mes anterior, últimos 30 días, este año o fechas a elección) y comparado con el período anterior:
+
+| Concepto | De dónde sale |
+|---|---|
+| **Ingresos** | Lo cobrado: señas (online y en el local), saldos de turnos, servicios y productos vendidos en la caja (con descuentos aplicados) y ventas pagadas de la tienda online. Las devoluciones de seña restan. El envío cobrado en la web no se cuenta como ingreso. |
+| **Costo de lo vendido** | Productos: el **costo** cargado en cada artículo/variante del Inventario. Servicios: el **costo por sesión** (insumos) de cada servicio, por cada turno atendido. |
+| **Gastos** | Los cargados en *Resultados → Gastos* (alquiler, sueldos, servicios, publicidad, comisiones, impuestos…) y los egresos de caja. Los retiros de dinero del dueño no son gasto. |
+| **Ganancia bruta / neta** | Ingresos − costo / ingresos − costo − gastos, con su margen. |
+
+Al vender se guarda el costo de ese momento, así que cambiar un costo después no altera los resultados pasados. Si algún producto o servicio no tiene costo cargado, el informe lo avisa (la ganancia daría más alta de lo real). La compra de mercadería no se carga como gasto: su costo se cuenta cuando se vende.
+
 ## Estructura
 
 ```
@@ -145,6 +159,8 @@ src/
     tiendanube.js      cliente y sincronización con Tienda Nube
     weborders.js       ventas web (órdenes de Tienda Nube)
     inventory.js       categorías, artículos, variantes, fotos y descuentos
+    reports.js         informe de resultados (ingresos, costos, gastos, ganancias)
+    expenses.js        gastos del negocio
     stock.js           movimientos de stock
     cash.js            caja, ventas y movimientos
   routes/              API pública, panel y webhooks

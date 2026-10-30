@@ -155,6 +155,8 @@ function variantBody(v, { includePrice }) {
     depth: v.depth ? String(v.depth) : null,
   };
   if (v.values && v.values.length) body.values = v.values.map((x) => ({ [LANG]: x }));
+  // Costo: Tienda Nube lo guarda como dato privado (no se muestra a los clientes).
+  if (v.cost !== null && v.cost !== undefined) body.cost = round2(v.cost).toFixed(2);
   if (includePrice) {
     body.price = round2(v.price).toFixed(2);
     body.promotional_price = v.promo_price && v.promo_price < v.price ? round2(v.promo_price).toFixed(2) : null;
@@ -505,6 +507,7 @@ async function importProducts({ stockFrom = 'remote' } = {}) {
         const promo = num(v.promotional_price);
         const vf = [v.sku || null, name, JSON.stringify(values), round2(v.price || 0), promo && promo < Number(v.price) ? promo : null,
           num(v.weight), num(v.width), num(v.height), num(v.depth), article.id, String(rp.id), String(v.id)];
+        const remoteCost = num(v.cost);
         if (!local) {
           const res = db.run(
             `INSERT INTO products (sku, name, variant_values, price, promo_price, weight, width, height, depth, article_id, tn_product_id, tn_variant_id, stock)
@@ -512,6 +515,7 @@ async function importProducts({ stockFrom = 'remote' } = {}) {
             ...vf
           );
           const id = Number(res.lastInsertRowid);
+          if (remoteCost) db.run('UPDATE products SET cost = ? WHERE id = ?', remoteCost, id);
           if (remoteStock) stock.change(id, { setTo: Math.max(0, remoteStock), type: 'tiendanube_import', reason: 'Importación inicial', source: 'tiendanube' });
           if (remoteStock === null) toPush.push(id); // la web tenía stock infinito: pasa a manejar stock
           if (!isNew) stats.updated++;
@@ -523,6 +527,7 @@ async function importProducts({ stockFrom = 'remote' } = {}) {
           ...vf,
           local.id
         );
+        if (remoteCost && (local.cost === null || local.cost === undefined)) db.run('UPDATE products SET cost = ? WHERE id = ?', remoteCost, local.id);
         if (stockFrom === 'remote' && remoteStock !== null && remoteStock !== local.stock) {
           stock.change(local.id, { setTo: Math.max(0, remoteStock), type: 'tiendanube_import', reason: 'Stock tomado de Tienda Nube', source: 'tiendanube' });
           stats.updated++;
