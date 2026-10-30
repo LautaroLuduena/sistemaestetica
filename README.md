@@ -5,7 +5,7 @@ Sistema web para un centro de estética / bronceado con:
 - **Reservas online**: las clientas eligen servicio, día y horario, y pagan una **seña con Mercado Pago** para confirmar el turno.
 - **Agenda**: turnos web y cargados en el local, reprogramación, cancelación con devolución de seña, "no vino", link de pago de seña por WhatsApp.
 - **Inventario**: categorías y subcategorías, artículos con marca, descripción, 1 a 3 fotos, precio y precio promocional, peso y medidas, y variantes (tamaño, color, etc.). Ajustes de stock (entrada, salida/rotura, conteo físico), historial de movimientos, alertas de stock mínimo y descuentos por porcentaje. Sin módulo de compras.
-- **Caja**: apertura/cierre con arqueo, ventas de productos y servicios, cobro del saldo de los turnos, señas, ingresos/egresos, y cobro con **link/QR de Mercado Pago**.
+- **Caja**: siempre abierta (sin apertura ni cierre; arqueo opcional para contar el efectivo). Para cobrar se busca el producto, servicio o la clienta con turno hoy, se elige la clienta y se imprime un **ticket no fiscal** (58 u 80 mm). Señas, ingresos/egresos y cobro con **link/QR de Mercado Pago**.
 - **Tienda Nube**: los productos y el stock se replican en la tienda online, y las ventas de la web descuentan el stock del sistema.
 - **Resultados**: ingresos, costo de lo vendido, ganancia bruta, gastos y ganancia neta por período, con detalle por servicio, por producto, por canal y por categoría de gasto.
 

@@ -39,7 +39,8 @@ router.get('/dashboard', (req, res) => {
       `SELECT p.id, p.name, p.sku, p.stock, p.min_stock FROM products p LEFT JOIN articles a ON a.id = p.article_id
        WHERE p.active = 1 AND IFNULL(a.active, 1) = 1 AND p.stock <= p.min_stock ORDER BY p.stock, p.name LIMIT 50`
     ),
-    cash: session ? cash.summary(session.id) : null,
+    cash: cash.summary(session.id),
+    cashToday: cash.todaySummary(),
     integrations: { mercadopago: mp.isConfigured(), tiendanube: tn.isConfigured() },
     tnSyncErrors: db.one(`SELECT COUNT(*) AS n FROM articles WHERE tn_sync_status = 'error'`).n,
     webOrders: weborders.stats(),
@@ -336,9 +337,10 @@ router.get('/cash', (req, res) => {
   const session = cash.currentSession();
   res.json({
     methods: cash.METHODS,
-    session: session ? cash.summary(session.id) : null,
-    movements: session ? cash.movements(session.id) : [],
-    sales: session ? cash.listSales({ sessionId: session.id }) : [],
+    session: cash.summary(session.id),
+    today: cash.todaySummary(),
+    movements: cash.movements(session.id),
+    sales: cash.listSales({ limit: 200 }),
     unassigned: cash.movements(null).slice(0, 50),
     pendingSales: cash.listSales({ status: 'pending', limit: 50 }),
   });

@@ -1,7 +1,8 @@
 const db = require('../db');
 const agenda = require('./agenda');
 const stock = require('./stock');
-const { badRequest, notFound, conflict, round2, money, int } = require('../util');
+const settings = require('../settings');
+const { badRequest, notFound, conflict, round2, money, int, nowInTz, utcRange } = require('../util');
 
 // Precio vigente: el promocional si hay uno menor al precio normal.
 const effectivePrice = (p) => (p.promo_price && p.promo_price > 0 && p.promo_price < p.price ? p.promo_price : p.price);
@@ -24,19 +25,22 @@ const MOVEMENT_TYPES = {
   sale_cancel: 'Anulación de venta',
 };
 
+// La caja está siempre abierta: si no hay una sesión abierta se abre sola, con el efectivo
+// contado en el último arqueo como monto inicial.
 function currentSession() {
-  return db.one('SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1') || null;
+  const open = db.one('SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1');
+  if (open) return open;
+  const last = db.one('SELECT counted_amount FROM cash_sessions WHERE closed_at IS NOT NULL ORDER BY id DESC LIMIT 1');
+  const res = db.run('INSERT INTO cash_sessions (opening_amount) VALUES (?)', last && last.counted_amount ? last.counted_amount : 0);
+  return db.one('SELECT * FROM cash_sessions WHERE id = ?', Number(res.lastInsertRowid));
 }
 
-function requireOpen() {
-  const s = currentSession();
-  if (!s) throw conflict('La caja está cerrada. Abrila para poder cobrar.');
-  return s;
-}
+const requireOpen = () => currentSession();
 
 function openSession({ openingAmount = 0, notes = null }, userId) {
   return db.tx(() => {
-    if (currentSession()) throw conflict('Ya hay una caja abierta');
+    const open = db.one('SELECT id FROM cash_sessions WHERE closed_at IS NULL');
+    if (open) throw conflict('Ya hay una caja abierta');
     const res = db.run('INSERT INTO cash_sessions (opened_by, opening_amount, notes) VALUES (?, ?, ?)', userId, money(openingAmount || 0, 'monto inicial'), notes);
     return db.one('SELECT * FROM cash_sessions WHERE id = ?', Number(res.lastInsertRowid));
   });
@@ -45,7 +49,8 @@ function openSession({ openingAmount = 0, notes = null }, userId) {
 function addMovement({ type, method, amount, description = null, saleId = null, appointmentId = null, reference = null, requireSession = true }, userId = null) {
   if (!MOVEMENT_TYPES[type]) throw badRequest('Tipo de movimiento inválido');
   if (!METHODS[method]) throw badRequest('Medio de pago inválido');
-  const session = requireSession ? requireOpen() : currentSession();
+  void requireSession; // la caja siempre está abierta
+  const session = currentSession();
   const res = db.run(
     `INSERT INTO cash_movements (cash_session_id, type, payment_method, amount, description, sale_id, appointment_id, reference, user_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -87,9 +92,12 @@ function summary(sessionId) {
   return { session, byMethod, byType, expectedCash, total };
 }
 
+/**
+ * Arqueo: se cuenta el efectivo, se registra la diferencia y la caja sigue abierta con lo contado.
+ */
 function closeSession({ countedAmount, notes = null }, userId) {
   return db.tx(() => {
-    const session = requireOpen();
+    const session = currentSession();
     const counted = money(countedAmount, 'efectivo contado');
     const { expectedCash } = summary(session.id);
     db.run(
@@ -102,8 +110,28 @@ function closeSession({ countedAmount, notes = null }, userId) {
       notes,
       session.id
     );
-    return summary(session.id);
+    const result = summary(session.id);
+    currentSession(); // se abre la siguiente con el efectivo contado
+    return result;
   });
+}
+
+// Lo cobrado hoy (por medio de pago), sin importar los arqueos.
+function todaySummary() {
+  const tz = settings.get('timezone');
+  const date = nowInTz(tz).date;
+  const [start, end] = utcRange(date, date, tz);
+  const byMethod = {};
+  for (const m of Object.keys(METHODS)) byMethod[m] = 0;
+  for (const r of db.all(
+    `SELECT payment_method, SUM(amount) AS total FROM cash_movements
+     WHERE created_at BETWEEN ? AND ? AND type IN ('sale', 'deposit', 'refund', 'sale_cancel') GROUP BY payment_method`,
+    start,
+    end
+  )) {
+    byMethod[r.payment_method] = round2(r.total);
+  }
+  return { date, byMethod, total: round2(Object.values(byMethod).reduce((a, b) => a + b, 0)) };
 }
 
 function movements(sessionId) {
@@ -215,6 +243,7 @@ function createSale({ items, discount = 0, method, clientId = null, notes = null
     if (isLink && total <= 0) throw badRequest('El total debe ser mayor a cero para cobrar con Mercado Pago');
     const apptLine = lines.find((l) => l.appointment_id);
     let client = clientId ? Number(clientId) : null;
+    if (client && !db.one('SELECT 1 FROM clients WHERE id = ?', client)) throw notFound('La clienta no existe');
     if (!client && apptLine) client = agenda.getAppointment(apptLine.appointment_id).client_id;
 
     // Para links de pago, se verifica el stock ahora (se descuenta al acreditarse).
@@ -375,6 +404,7 @@ module.exports = {
   addMovement,
   manualMovement,
   summary,
+  todaySummary,
   movements,
   sessions,
   chargeDeposit,

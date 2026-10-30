@@ -323,3 +323,16 @@ label .link { font-size: 0.8rem; margin-left: 0.4rem; }
   border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.85rem; pointer-events: none; min-width: 170px; }
 .chart-tip .tip-title { color: var(--muted); margin-bottom: 0.25rem; }
 .chart-tip .tip-row { display: flex; justify-content: space-between; gap: 0.8rem; flex-direction: row-reverse; }
+
+/* Caja: buscador y clienta */
+.search-box { position: relative; }
+.search-box > input { font-size: 1.05rem; padding: 0.7em 0.9em; }
+.results { position: absolute; left: 0; right: 0; top: calc(100% + 4px); background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(60, 40, 20, 0.15); z-index: 20; max-height: 380px; overflow-y: auto; }
+.result { display: flex; align-items: center; gap: 0.6rem; width: 100%; background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
+  color: var(--text); text-align: left; padding: 0.55rem 0.8rem; justify-content: flex-start; }
+.result:last-child { border-bottom: 0; }
+.result:hover, .result.active { background: var(--primary-soft); color: var(--text); }
+.thumb.sm { width: 34px; height: 34px; }
+.client-chip { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-top: 0.8rem; padding: 0.5rem 0.7rem;
+  background: var(--primary-soft); border-radius: 8px; }

@@ -152,7 +152,7 @@ VIEWS.inicio = async () => {
     ${d.alerts.map((a) => `<div class="alert danger"><b>Turno ${fmtDate(a.date, { day: '2-digit', month: '2-digit' })} ${a.start_time} - ${esc(a.client_name)}:</b> ${esc(a.alert)} <button class="link" data-appt="${a.id}">Ver</button></div>`).join('')}
     <div class="grid cols-4">
       <div class="card stat"><div class="label">Turnos hoy</div><div class="value">${d.appointments.length}</div></div>
-      <div class="card stat"><div class="label">Caja</div><div class="value">${c ? fmtMoney(c.total) : '<span class="badge gray">Cerrada</span>'}</div></div>
+      <div class="card stat"><div class="label">Cobrado hoy</div><div class="value">${fmtMoney(d.cashToday.total)}</div></div>
       <div class="card stat"><div class="label">Efectivo esperado</div><div class="value">${c ? fmtMoney(c.expectedCash) : '-'}</div></div>
       <div class="card stat"><div class="label">Productos con poco stock</div><div class="value">${d.lowStock.length}</div></div>
     </div>
@@ -549,26 +549,22 @@ async function openAppointment(id) {
 // ---------- Caja ----------
 
 VIEWS.caja = async () => {
-  const [data, products, services] = await Promise.all([
-    adminApi('/api/admin/cash'),
-    adminApi('/api/admin/products'),
-    loadServices(),
-  ]);
+  const [data, products, services] = await Promise.all([adminApi('/api/admin/cash'), adminApi('/api/admin/products'), loadServices()]);
   const tab = app.query.get('tab') || 'cobrar';
-  if (!data.session) return renderCashClosed(data);
   const s = data.session;
+  const t = data.today;
   $('#main').innerHTML = `
-    <div class="page-head"><h1>Caja <small class="muted">abierta ${fmtDateTime(s.session.opened_at)}</small></h1>
-      <div class="row"><button class="secondary" id="mov">Ingreso / egreso</button><button class="danger" id="close">Cerrar caja</button></div></div>
+    <div class="page-head"><h1>Caja</h1>
+      <div class="row"><button class="secondary" id="mov">Ingreso / egreso</button><button class="secondary" id="close">Arqueo</button></div></div>
     <div class="grid cols-4">
-      <div class="card stat"><div class="label">Total del día</div><div class="value">${fmtMoney(s.total)}</div></div>
-      <div class="card stat"><div class="label">Efectivo en caja</div><div class="value">${fmtMoney(s.expectedCash)}</div><small class="muted">inicial ${fmtMoney(s.session.opening_amount)}</small></div>
-      <div class="card stat"><div class="label">Mercado Pago</div><div class="value">${fmtMoney(s.byMethod.mercadopago)}</div></div>
-      <div class="card stat"><div class="label">Tarjetas / transf.</div><div class="value">${fmtMoney((s.byMethod.debito || 0) + (s.byMethod.credito || 0) + (s.byMethod.transferencia || 0))}</div></div>
+      <div class="card stat"><div class="label">Cobrado hoy</div><div class="value">${fmtMoney(t.total)}</div></div>
+      <div class="card stat"><div class="label">Efectivo en caja</div><div class="value">${fmtMoney(s.expectedCash)}</div><small class="muted">desde el último arqueo</small></div>
+      <div class="card stat"><div class="label">Mercado Pago hoy</div><div class="value">${fmtMoney(t.byMethod.mercadopago)}</div></div>
+      <div class="card stat"><div class="label">Tarjetas / transf. hoy</div><div class="value">${fmtMoney((t.byMethod.debito || 0) + (t.byMethod.credito || 0) + (t.byMethod.transferencia || 0))}</div></div>
     </div>
     ${data.pendingSales.length ? `<div class="alert warn">${data.pendingSales.length} cobro(s) con Mercado Pago esperando el pago. <a href="#caja?tab=ventas">Ver</a></div>` : ''}
     <div class="tabs">
-      ${[['cobrar', 'Cobrar'], ['movimientos', 'Movimientos'], ['ventas', 'Ventas'], ['historial', 'Cajas anteriores']]
+      ${[['cobrar', 'Cobrar'], ['ventas', 'Ventas'], ['movimientos', 'Movimientos'], ['historial', 'Arqueos']]
         .map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`)
         .join('')}
     </div>
@@ -577,161 +573,221 @@ VIEWS.caja = async () => {
   $('#mov').onclick = () => cashMovementModal();
   $('#close').onclick = () => closeCashModal(s);
   if (tab === 'cobrar') renderPos(products, services);
-  if (tab === 'movimientos') $('#tab').innerHTML = `<div class="card">${movementsTable(data.movements)}</div>`;
+  if (tab === 'movimientos') $('#tab').innerHTML = `<div class="card"><h2>Movimientos desde el último arqueo</h2>${movementsTable(data.movements)}</div>`;
   if (tab === 'ventas') renderSales(data);
   if (tab === 'historial') renderCashHistory();
 };
 
-function renderCashClosed(data) {
-  $('#main').innerHTML = `
-    <div class="page-head"><h1>Caja</h1></div>
-    <div class="card" style="max-width:420px">
-      <h2>Abrir caja</h2>
-      <form id="open"><label>Efectivo inicial<input name="openingAmount" type="number" step="0.01" min="0" value="0" /></label>
-      <button>Abrir caja</button></form>
-    </div>
-    ${data.pendingSales.length ? `<div class="card"><h2>Cobros pendientes de Mercado Pago</h2>${salesTable(data.pendingSales)}</div>` : ''}
-    ${data.unassigned.length ? `<div class="card"><h2>Movimientos con la caja cerrada</h2><p class="muted">Señas y pagos de Mercado Pago que se acreditaron mientras la caja estaba cerrada.</p>${movementsTable(data.unassigned)}</div>` : ''}
-    <div class="card"><h2>Cajas anteriores</h2><div id="hist"></div></div>`;
-  $('#open').onsubmit = async (e) => {
-    e.preventDefault();
-    if (await act(() => adminApi('/api/admin/cash/open', { method: 'POST', body: formData(e.target) }), 'Caja abierta')) route();
-  };
-  renderCashHistory($('#hist'));
-  bindSaleActions();
-}
-
+// Buscador único: productos, servicios y turnos de hoy con saldo (por nombre de la clienta).
 function renderPos(products, services) {
-  const today0 = today();
+  app.saleClient = app.saleClient || null;
   $('#tab').innerHTML = `
     <div class="pos">
       <div class="card">
-        <div class="row" style="margin-bottom:0.8rem">
-          <input id="psearch" class="grow" placeholder="Buscar producto por nombre o SKU (Enter agrega si hay uno solo)" />
+        <div class="search-box">
+          <input id="psearch" placeholder="Buscá un producto, un servicio o la clienta con turno hoy…" autocomplete="off" />
+          <div id="presults" class="results hidden"></div>
         </div>
-        <h3>Servicios</h3>
-        <div class="product-grid" style="max-height:none;margin-bottom:1rem">
-          ${services.filter((x) => x.active).map((x) => `<button class="product-tile" data-svc="${x.id}"><b>${esc(x.name)}</b><small>${fmtMoney(x.price)}</small></button>`).join('')}
-          <button class="product-tile" id="free"><b>Otro concepto</b><small>Importe libre</small></button>
-        </div>
-        <div class="row between"><h3>Turnos de hoy con saldo</h3></div>
-        <div id="today-appts" class="muted">Cargando…</div>
-        <h3 style="margin-top:1rem">Productos</h3>
-        <div class="product-grid" id="pgrid"></div>
+        <div class="row" style="margin-top:0.6rem"><button class="link" id="free">+ Otro concepto (importe libre)</button></div>
+        <div id="today-appts" style="margin-top:1rem"></div>
       </div>
       <div class="card">
         <h2>Venta</h2>
         <div id="cart"></div>
+        <div id="client-box"></div>
         <div class="grid cols-2" style="margin-top:0.8rem">
           <label>Descuento<input id="discount" type="number" step="0.01" min="0" value="0" /></label>
           <label>Medio de pago<select id="method">${methodOptions()}<option value="mp_link">Mercado Pago (link / QR)</option></select></label>
         </div>
         <div class="summary-line total"><span>Total</span><span id="total">$ 0</span></div>
-        <button id="pay" style="width:100%;margin-top:0.8rem">Cobrar</button>
+        <label class="check" style="margin-top:0.6rem"><input type="checkbox" id="autoprint" /> Imprimir ticket al cobrar</label>
+        <button id="pay" style="width:100%;margin-top:0.4rem">Cobrar</button>
       </div>
     </div>`;
-
-  const renderProducts = (q = '') => {
-    const ql = q.toLowerCase();
-    const list = products.filter((p) => !ql || p.name.toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql));
-    $('#pgrid').innerHTML = list.length
-      ? list
-          .map(
-            (p) => `<button class="product-tile" data-prod="${p.id}" ${p.stock <= 0 ? 'style="opacity:.55"' : ''}>
-              ${p.thumb ? `<img src="${esc(p.thumb)}" alt="" class="thumb" />` : ''}<b>${esc(p.name)}</b>
-              <small>${p.effective_price < p.price ? `<s>${fmtMoney(p.price)}</s> <b style="color:var(--danger)">${fmtMoney(p.effective_price)}</b>` : fmtMoney(p.price)} · stock ${p.stock}</small></button>`
-          )
-          .join('')
-      : '<p class="muted">Sin productos.</p>';
-    $$('[data-prod]').forEach((b) => (b.onclick = () => addProduct(products.find((p) => p.id === Number(b.dataset.prod)))));
-    return list;
-  };
-  const addProduct = (p) => {
-    const line = app.cart.find((l) => l.productId === p.id);
-    if (line) line.quantity++;
-    else app.cart.push({ productId: p.id, description: p.name, quantity: 1, unitPrice: p.effective_price, stock: p.stock });
-    renderCart();
-  };
-  renderProducts();
-  $('#psearch').oninput = (e) => renderProducts(e.target.value);
-  $('#psearch').onkeydown = (e) => {
-    if (e.key !== 'Enter') return;
-    const list = renderProducts(e.target.value);
-    if (list.length === 1) {
-      addProduct(list[0]);
-      e.target.value = '';
-      renderProducts();
+  try {
+    $('#autoprint').checked = localStorage.getItem('autoprint') === '1';
+  } catch {
+    // sin almacenamiento local
+  }
+  $('#autoprint').onchange = (e) => {
+    try {
+      localStorage.setItem('autoprint', e.target.checked ? '1' : '0');
+    } catch {
+      // sin almacenamiento local
     }
   };
-  $$('[data-svc]').forEach(
-    (b) =>
-      (b.onclick = () => {
-        const s = services.find((x) => x.id === Number(b.dataset.svc));
-        app.cart.push({ serviceId: s.id, description: s.name, quantity: 1, unitPrice: s.price });
-        renderCart();
-      })
-  );
+
+  let todayAppts = [];
+  const box = $('#presults');
+  const norm = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  let options = [];
+  let active = 0;
+  const renderResults = () => {
+    const q = norm($('#psearch').value.trim());
+    if (!q) {
+      box.classList.add('hidden');
+      return;
+    }
+    const words = q.split(/\s+/);
+    const match = (text) => words.every((w) => norm(text).includes(w));
+    options = [
+      ...todayAppts.filter((a) => match(`${a.client_name} ${a.service_name}`)).map((a) => ({ kind: 'appt', a })),
+      ...services.filter((x) => x.active && match(x.name)).map((x) => ({ kind: 'svc', x })),
+      ...products.filter((p) => match(`${p.name} ${p.sku || ''} ${p.brand || ''}`)).map((p) => ({ kind: 'prod', p })),
+    ].slice(0, 12);
+    active = 0;
+    box.innerHTML = options.length
+      ? options
+          .map((o, i) => {
+            if (o.kind === 'appt')
+              return `<button class="result" data-i="${i}"><span class="badge info">Turno hoy</span><span class="grow"><b>${esc(o.a.client_name)}</b> · ${esc(o.a.service_name)} ${o.a.start_time}</span><b>${fmtMoney(o.a.balance)}</b></button>`;
+            if (o.kind === 'svc') return `<button class="result" data-i="${i}"><span class="badge">Servicio</span><span class="grow">${esc(o.x.name)}</span><b>${fmtMoney(o.x.price)}</b></button>`;
+            const p = o.p;
+            return `<button class="result" data-i="${i}">${p.thumb ? `<img src="${esc(p.thumb)}" alt="" class="thumb sm" />` : '<span class="badge gray">Producto</span>'}
+              <span class="grow">${esc(p.name)} <small class="muted">${p.sku ? `${esc(p.sku)} · ` : ''}stock ${p.stock}</small></span>
+              <b>${p.effective_price < p.price ? `<s class="muted">${fmtMoney(p.price)}</s> ` : ''}${fmtMoney(p.effective_price)}</b></button>`;
+          })
+          .join('')
+      : '<p class="muted" style="margin:0.6rem">No se encontró nada con ese nombre.</p>';
+    box.classList.remove('hidden');
+    highlight();
+    $$('.result', box).forEach((b) => (b.onclick = () => pick(options[Number(b.dataset.i)])));
+  };
+  const highlight = () => $$('.result', box).forEach((b, i) => b.classList.toggle('active', i === active));
+  const pick = (o) => {
+    if (!o) return;
+    if (o.kind === 'appt') addAppointmentLine(o.a);
+    else if (o.kind === 'svc') app.cart.push({ serviceId: o.x.id, description: o.x.name, quantity: 1, unitPrice: o.x.price });
+    else {
+      const line = app.cart.find((l) => l.productId === o.p.id);
+      if (line) line.quantity++;
+      else app.cart.push({ productId: o.p.id, description: o.p.name, quantity: 1, unitPrice: o.p.effective_price, stock: o.p.stock });
+      if (o.p.stock <= 0) toast(`Atención: "${o.p.name}" no tiene stock cargado`, 'error');
+    }
+    $('#psearch').value = '';
+    box.classList.add('hidden');
+    renderCart();
+    $('#psearch').focus();
+  };
+  $('#psearch').oninput = renderResults;
+  $('#psearch').onkeydown = (e) => {
+    if (box.classList.contains('hidden')) return;
+    if (e.key === 'ArrowDown') active = Math.min(active + 1, options.length - 1);
+    else if (e.key === 'ArrowUp') active = Math.max(active - 1, 0);
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      return pick(options[active]);
+    } else if (e.key === 'Escape') return box.classList.add('hidden');
+    else return;
+    e.preventDefault();
+    highlight();
+  };
   $('#free').onclick = () => {
     app.cart.push({ description: '', quantity: 1, unitPrice: 0, free: true });
     renderCart();
   };
-
-  adminApi(`/api/admin/appointments?from=${today0}&to=${today0}`).then((list) => {
-    const withBalance = list.filter((a) => a.balance > 0 && ['confirmed', 'pending_payment'].includes(a.status));
-    $('#today-appts').innerHTML = withBalance.length
-      ? withBalance
+  adminApi(`/api/admin/appointments?from=${today()}&to=${today()}`).then((list) => {
+    todayAppts = list.filter((a) => a.balance > 0 && ['confirmed', 'pending_payment'].includes(a.status));
+    $('#today-appts').innerHTML = todayAppts.length
+      ? `<small class="muted">Turnos de hoy con saldo: </small>${todayAppts
           .map((a) => `<button class="secondary small" data-ap="${a.id}" style="margin:0 0.3rem 0.3rem 0">${a.start_time} ${esc(a.client_name)} · ${fmtMoney(a.balance)}</button>`)
-          .join('')
-      : '<span class="muted">No hay turnos con saldo pendiente hoy.</span>';
-    $$('[data-ap]').forEach(
-      (b) =>
-        (b.onclick = () => {
-          const a = withBalance.find((x) => x.id === Number(b.dataset.ap));
-          if (app.cart.some((l) => l.appointmentId === a.id)) return;
-          app.cart.push({ appointmentId: a.id, description: `${a.service_name} - ${a.client_name} (saldo)`, quantity: 1, unitPrice: a.balance, fixedQty: true });
-          renderCart();
-        })
-    );
+          .join('')}`
+      : '';
+    $$('[data-ap]').forEach((b) => (b.onclick = () => addAppointmentLine(todayAppts.find((x) => x.id === Number(b.dataset.ap)))));
   });
-
   $('#discount').oninput = renderTotals;
   $('#pay').onclick = paySale;
   renderCart();
+  $('#psearch').focus();
+}
+
+function addAppointmentLine(a) {
+  if (!app.cart.some((l) => l.appointmentId === a.id)) {
+    app.cart.push({ appointmentId: a.id, description: `${a.service_name} - ${a.client_name} (saldo)`, quantity: 1, unitPrice: a.balance, fixedQty: true });
+  }
+  // La clienta del turno queda como clienta de la venta.
+  if (!app.saleClient) app.saleClient = { id: a.client_id, name: a.client_name, phone: a.client_phone };
+  renderCart();
+}
+
+// Selector de clienta de la venta (buscar o crear).
+function renderClientBox() {
+  const el = $('#client-box');
+  if (!el) return;
+  const c = app.saleClient;
+  if (c) {
+    el.innerHTML = `<div class="client-chip"><span>Clienta: <b>${esc(c.name)}</b>${c.phone ? ` <small class="muted">${esc(c.phone)}</small>` : ''}</span><button class="link" id="client-clear">cambiar</button></div>`;
+    $('#client-clear').onclick = () => {
+      app.saleClient = null;
+      renderClientBox();
+      $('#client-q').focus();
+    };
+    return;
+  }
+  el.innerHTML = `<label style="margin:0.8rem 0 0">Clienta <small class="muted">(opcional)</small>
+      <div class="search-box"><input id="client-q" placeholder="Buscar por nombre o teléfono" autocomplete="off" /><div id="client-results" class="results hidden"></div></div></label>
+    <button class="link" id="client-new" style="font-size:0.85rem">+ Clienta nueva</button>`;
+  let t;
+  const results = $('#client-results');
+  $('#client-q').oninput = (e) => {
+    clearTimeout(t);
+    const q = e.target.value.trim();
+    if (!q) return results.classList.add('hidden');
+    t = setTimeout(async () => {
+      const list = (await adminApi(`/api/admin/clients?q=${encodeURIComponent(q)}`)).slice(0, 8);
+      results.innerHTML = list.length
+        ? list.map((x, i) => `<button class="result" data-ci="${i}"><span class="grow">${esc(x.name)}</span><small class="muted">${esc(x.phone || x.email || '')}</small></button>`).join('')
+        : '<p class="muted" style="margin:0.6rem">No hay clientas con ese nombre.</p>';
+      results.classList.remove('hidden');
+      $$('[data-ci]', results).forEach(
+        (b) =>
+          (b.onclick = () => {
+            app.saleClient = list[Number(b.dataset.ci)];
+            renderClientBox();
+          })
+      );
+    }, 250);
+  };
+  $('#client-new').onclick = () =>
+    clientModal(null, (saved) => {
+      app.saleClient = saved;
+      renderClientBox();
+    });
 }
 
 function renderCart() {
   const el = $('#cart');
   if (!el) return;
   if (!app.cart.length) {
-    el.innerHTML = '<p class="muted">Agregá productos, servicios o turnos.</p>';
-    renderTotals();
-    return;
-  }
-  el.innerHTML = app.cart
-    .map(
-      (l, i) => `<div class="cart-line">
+    el.innerHTML = '<p class="muted">Buscá y agregá productos o servicios.</p>';
+  } else {
+    el.innerHTML = app.cart
+      .map(
+        (l, i) => `<div class="cart-line">
         ${l.free ? `<input data-i="${i}" data-f="description" placeholder="Concepto" value="${esc(l.description)}" />` : `<span>${esc(l.description)}</span>`}
         <input data-i="${i}" data-f="quantity" type="number" min="1" step="1" value="${l.quantity}" ${l.fixedQty ? 'disabled' : ''} />
         <input data-i="${i}" data-f="unitPrice" type="number" min="0" step="0.01" value="${l.unitPrice}" />
         <button class="danger small" data-del="${i}" title="Quitar">✕</button>
       </div>`
-    )
-    .join('');
-  $$('[data-f]', el).forEach(
-    (inp) =>
-      (inp.oninput = () => {
-        const l = app.cart[Number(inp.dataset.i)];
-        l[inp.dataset.f] = inp.dataset.f === 'description' ? inp.value : Number(inp.value);
-        renderTotals();
-      })
-  );
-  $$('[data-del]', el).forEach(
-    (b) =>
-      (b.onclick = () => {
-        app.cart.splice(Number(b.dataset.del), 1);
-        renderCart();
-      })
-  );
+      )
+      .join('');
+    $$('[data-f]', el).forEach(
+      (inp) =>
+        (inp.oninput = () => {
+          const l = app.cart[Number(inp.dataset.i)];
+          l[inp.dataset.f] = inp.dataset.f === 'description' ? inp.value : Number(inp.value);
+          renderTotals();
+        })
+    );
+    $$('[data-del]', el).forEach(
+      (b) =>
+        (b.onclick = () => {
+          app.cart.splice(Number(b.dataset.del), 1);
+          renderCart();
+        })
+    );
+  }
+  renderClientBox();
   renderTotals();
 }
 
@@ -747,6 +803,7 @@ function renderTotals() {
 async function paySale() {
   if (!app.cart.length) return toast('La venta está vacía', 'error');
   const method = $('#method').value;
+  const autoprint = $('#autoprint').checked;
   const items = app.cart.map((l) => {
     if (l.productId) return { productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice };
     if (l.appointmentId) return { appointmentId: l.appointmentId, amount: l.unitPrice };
@@ -754,13 +811,82 @@ async function paySale() {
     return { description: l.description, quantity: l.quantity, unitPrice: l.unitPrice };
   });
   $('#pay').disabled = true;
-  const r = await act(() => adminApi('/api/admin/sales', { method: 'POST', body: { items, discount: $('#discount').value, method } }));
+  const r = await act(() =>
+    adminApi('/api/admin/sales', { method: 'POST', body: { items, discount: $('#discount').value, method, clientId: app.saleClient ? app.saleClient.id : null } })
+  );
   $('#pay').disabled = false;
   if (!r) return;
   app.cart = [];
-  if (r.init_point) showPaymentQr(r.sale, r);
-  else toast(`Venta #${r.sale.id} cobrada: ${fmtMoney(r.sale.total)}`);
+  app.saleClient = null;
   route();
+  if (r.init_point) return showPaymentQr(r.sale, r);
+  if (autoprint) printTicket(r.sale.id);
+  saleDoneModal(r.sale);
+}
+
+function saleDoneModal(sale) {
+  const m = modal(`<div style="text-align:center">
+      <h2>Venta #${sale.id} cobrada</h2>
+      <p style="font-size:1.6rem;font-weight:700;margin:0.4rem 0">${fmtMoney(sale.total)}</p>
+      <p class="muted">${esc(METHOD_LABELS[sale.payment_method] || sale.payment_method)}${sale.client_name ? ` · ${esc(sale.client_name)}` : ''}</p>
+    </div>
+    <div class="actions" style="justify-content:center"><button class="secondary" id="print">Imprimir ticket</button><button data-close>Nueva venta</button></div>`);
+  $('#print', m).onclick = () => printTicket(sale.id);
+}
+
+// Ticket no fiscal para impresora térmica (58 u 80 mm) o impresora común.
+async function printTicket(saleId) {
+  const [sale, cfg] = await Promise.all([adminApi(`/api/admin/sales/${saleId}`), app.ticketCfg || adminApi('/api/admin/settings')]);
+  app.ticketCfg = cfg;
+  const width = Number(cfg.ticket_width) === 58 ? 58 : 80;
+  const money = (n) => fmtMoney(n).replace(/\s/g, ' ');
+  const when = new Date(`${String(sale.paid_at || sale.created_at).replace(' ', 'T')}Z`).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Ticket ${sale.id}</title><style>
+    @page { size: ${width}mm auto; margin: 0; }
+    * { box-sizing: border-box; }
+    body { width: ${width}mm; margin: 0; padding: 4mm 3mm; font: ${width === 58 ? 11 : 12}px/1.35 'Courier New', monospace; color: #000; }
+    .c { text-align: center; } .b { font-weight: bold; } .big { font-size: 1.25em; }
+    hr { border: 0; border-top: 1px dashed #000; margin: 2mm 0; }
+    table { width: 100%; border-collapse: collapse; } td { vertical-align: top; padding: 0.4mm 0; } td.r { text-align: right; white-space: nowrap; padding-left: 2mm; }
+    .small { font-size: 0.9em; }
+  </style></head><body>
+    <div class="c b big">${esc(cfg.business_name || '')}</div>
+    ${cfg.business_address ? `<div class="c small">${esc(cfg.business_address)}</div>` : ''}
+    ${cfg.business_phone ? `<div class="c small">Tel: ${esc(cfg.business_phone)}</div>` : ''}
+    <hr>
+    <div>Ticket N° ${String(sale.id).padStart(6, '0')}</div>
+    <div>${when}</div>
+    ${sale.client_name ? `<div>Clienta: ${esc(sale.client_name)}</div>` : ''}
+    <hr>
+    <table>${sale.items
+      .map(
+        (i) => `<tr><td colspan="2">${esc(i.description)}</td></tr>
+        <tr><td class="small">${i.quantity} x ${money(i.unit_price)}</td><td class="r">${money(i.subtotal)}</td></tr>`
+      )
+      .join('')}</table>
+    <hr>
+    <table>
+      ${sale.discount ? `<tr><td>Subtotal</td><td class="r">${money(sale.subtotal)}</td></tr><tr><td>Descuento</td><td class="r">-${money(sale.discount)}</td></tr>` : ''}
+      <tr class="b big"><td>TOTAL</td><td class="r">${money(sale.total)}</td></tr>
+      <tr><td>Pago</td><td class="r">${esc(METHOD_LABELS[sale.payment_method] || sale.payment_method)}</td></tr>
+    </table>
+    <hr>
+    ${cfg.ticket_footer ? `<div class="c">${esc(cfg.ticket_footer)}</div>` : ''}
+    <div class="c small" style="margin-top:2mm">Comprobante no válido como factura</div>
+  </body></html>`;
+  let frame = $('#ticket-frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'ticket-frame';
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+    document.body.appendChild(frame);
+  }
+  frame.onload = () => {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+  };
+  frame.srcdoc = html;
 }
 
 function showPaymentQr(sale, link) {
@@ -784,7 +910,8 @@ function showPaymentQr(sale, link) {
     if (s && s.status === 'paid') {
       clearInterval(poll);
       $('#qr-status', m).className = 'alert ok';
-      $('#qr-status', m).textContent = '¡Pago acreditado!';
+      $('#qr-status', m).innerHTML = '¡Pago acreditado! <button class="small" id="qr-print">Imprimir ticket</button>';
+      $('#qr-print', m).onclick = () => printTicket(sale.id);
       if (app.view === 'caja') route();
     }
   }, 3000);
@@ -809,12 +936,13 @@ function salesTable(list) {
   if (!list.length) return '<p class="muted">Sin ventas.</p>';
   const badge = { paid: '<span class="badge ok">Cobrada</span>', pending: '<span class="badge warn">Esperando pago</span>', cancelled: '<span class="badge gray">Anulada</span>' };
   return `<div class="table-wrap"><table>
-    <tr><th>#</th><th>Fecha</th><th>Detalle</th><th>Medio</th><th class="num">Total</th><th>Estado</th><th></th></tr>
+    <tr><th>#</th><th>Fecha</th><th>Clienta</th><th>Detalle</th><th>Medio</th><th class="num">Total</th><th>Estado</th><th></th></tr>
     ${list
       .map(
-        (s) => `<tr><td>${s.id}</td><td>${fmtDateTime(s.created_at)}</td><td>${esc(s.detail || '')}</td>
+        (s) => `<tr><td>${s.id}</td><td>${fmtDateTime(s.created_at)}</td><td>${esc(s.client_name || '-')}</td><td>${esc(s.detail || '')}</td>
         <td>${METHOD_LABELS[s.payment_method] || s.payment_method}</td><td class="num">${fmtMoney(s.total)}</td><td>${badge[s.status] || s.status}</td>
         <td style="white-space:nowrap">
+          ${s.status === 'paid' ? `<button class="secondary small" data-ticket="${s.id}">Ticket</button>` : ''}
           ${s.status === 'pending' ? `<button class="secondary small" data-qr="${s.id}">QR</button> <button class="secondary small" data-paid="${s.id}">Cobrada en otro medio</button>` : ''}
           ${s.status !== 'cancelled' ? `<button class="danger small" data-cancel="${s.id}">Anular</button>` : ''}
         </td></tr>`
@@ -826,11 +954,12 @@ function salesTable(list) {
 function renderSales(data) {
   $('#tab').innerHTML = `
     ${data.pendingSales.length ? `<div class="card"><h2>Esperando pago (Mercado Pago)</h2>${salesTable(data.pendingSales)}</div>` : ''}
-    <div class="card"><h2>Ventas de esta caja</h2>${salesTable(data.sales)}</div>`;
+    <div class="card"><h2>Últimas ventas</h2>${salesTable(data.sales)}</div>`;
   bindSaleActions();
 }
 
 function bindSaleActions() {
+  $$('[data-ticket]').forEach((b) => (b.onclick = () => printTicket(Number(b.dataset.ticket))));
   $$('[data-qr]').forEach(
     (b) =>
       (b.onclick = async () => {
@@ -879,14 +1008,14 @@ async function renderCashHistory(target) {
           <td><button class="secondary small" data-sess="${s.id}">Ver</button></td></tr>`
         )
         .join('')}</table></div>`
-      : '<p class="muted">Todavía no hay cajas.</p>'
+      : '<p class="muted">Todavía no hiciste arqueos.</p>'
   }</div>`;
   $$('[data-sess]', el).forEach(
     (b) =>
       (b.onclick = async () => {
         const d = await adminApi(`/api/admin/cash/sessions/${b.dataset.sess}`);
         modal(
-          `<h2>Caja #${d.session.id}</h2>
+          `<h2>Arqueo #${d.session.id}</h2>
           <div class="grid cols-3">${Object.entries(d.byMethod)
             .map(([k, v]) => `<div class="card stat"><div class="label">${METHOD_LABELS[k]}</div><div class="value">${fmtMoney(v)}</div></div>`)
             .join('')}</div>
@@ -920,13 +1049,14 @@ async function cashMovementModal() {
 }
 
 function closeCashModal(s) {
-  const m = modal(`<h2>Cerrar caja</h2>
+  const m = modal(`<h2>Arqueo de caja</h2>
+    <p class="muted">Contá el efectivo. Se registra la diferencia y la caja sigue abierta con lo que contaste.</p>
     <table>${Object.entries(s.byMethod).map(([k, v]) => `<tr><td>${METHOD_LABELS[k]}</td><td class="num">${fmtMoney(v)}</td></tr>`).join('')}
     <tr><td><b>Efectivo esperado en caja</b> <small class="muted">(inicial + movimientos en efectivo)</small></td><td class="num"><b>${fmtMoney(s.expectedCash)}</b></td></tr></table>
     <form id="f" style="margin-top:1rem"><label>Efectivo contado<input name="countedAmount" type="number" step="0.01" min="0" required value="${s.expectedCash}" /></label>
     <div id="diff" class="muted"></div>
     <label>Notas<textarea name="notes" rows="2"></textarea></label>
-    <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button class="danger">Cerrar caja</button></div></form>`);
+    <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Registrar arqueo</button></div></form>`);
   const f = $('#f', m);
   f.countedAmount.oninput = () => {
     const d = Number(f.countedAmount.value) - s.expectedCash;
@@ -934,7 +1064,7 @@ function closeCashModal(s) {
   };
   f.onsubmit = async (e) => {
     e.preventDefault();
-    const r = await act(() => adminApi('/api/admin/cash/close', { method: 'POST', body: formData(f) }), 'Caja cerrada');
+    const r = await act(() => adminApi('/api/admin/cash/close', { method: 'POST', body: formData(f) }), 'Arqueo registrado');
     if (r) {
       m.remove();
       route();
@@ -2210,6 +2340,7 @@ VIEWS.config = async () => {
 };
 
 async function saveSettings(form, msg = 'Configuración guardada') {
+  app.ticketCfg = null; // el ticket vuelve a leer los datos del negocio
   const body = formData(form);
   $$('input[type=checkbox]', form).forEach((c) => (body[c.name] = c.checked ? '1' : '0'));
   return act(() => adminApi('/api/admin/settings', { method: 'PUT', body }), msg);
@@ -2227,6 +2358,11 @@ const CONFIG_TABS = {
       <label>Dirección<input name="business_address" value="${esc(s.business_address)}" /></label>
       <label>URL pública del sistema (https)<input name="public_url" value="${esc(s.public_url)}" placeholder="https://turnos.miestetica.com.ar" />
         <small>Necesaria para que Mercado Pago y Tienda Nube avisen los pagos y ventas automáticamente.</small></label>
+      <h2 style="margin-top:1rem">Ticket de venta</h2>
+      <div class="grid cols-2">
+        <label>Ancho del papel<select name="ticket_width"><option value="80" ${s.ticket_width !== '58' ? 'selected' : ''}>80 mm (térmica estándar / impresora común)</option><option value="58" ${s.ticket_width === '58' ? 'selected' : ''}>58 mm (térmica chica)</option></select></label>
+        <label>Mensaje al pie del ticket<input name="ticket_footer" value="${esc(s.ticket_footer)}" /></label>
+      </div>
       <h2 style="margin-top:1rem">Reservas online</h2>
       <div class="grid cols-3">
         <label>Intervalo entre turnos (min)<input name="slot_interval_min" type="number" min="5" value="${esc(s.slot_interval_min)}" /></label>

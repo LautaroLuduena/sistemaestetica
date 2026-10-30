@@ -422,12 +422,10 @@ test('Tienda Nube: importar trae artículos con variantes, fotos, categorías y 
   assert.equal(db.one(`SELECT COUNT(*) AS n FROM articles WHERE tn_product_id = '900'`).n, 1);
 });
 
-test('caja: no se puede vender con la caja cerrada; venta, saldo de turno, anulación y cierre', async () => {
-  const closed = await call('/api/admin/sales', { method: 'POST', body: { items: [{ description: 'x', unitPrice: 10 }], method: 'efectivo' } });
-  assert.equal(closed.status, 409);
-
-  const open = await call('/api/admin/cash/open', { method: 'POST', body: { openingAmount: 5000 } });
-  assert.equal(open.status, 201);
+test('caja: siempre abierta; venta, saldo de turno, anulación y arqueo', async () => {
+  // Arqueo inicial: se cuentan $5.000 y la caja sigue abierta con ese efectivo.
+  await call('/api/admin/cash/close', { method: 'POST', body: { countedAmount: 5000 } });
+  assert.equal((await call('/api/admin/cash')).data.session.session.opening_amount, 5000);
 
   const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
   const appt = db.one(`SELECT id FROM appointments WHERE status = 'confirmed' AND deposit_paid > 0 ORDER BY id LIMIT 1`);
@@ -460,11 +458,15 @@ test('caja: no se puede vender con la caja cerrada; venta, saldo de turno, anula
 
   const close = await call('/api/admin/cash/close', { method: 'POST', body: { countedAmount: 36500 } });
   assert.equal(close.data.session.difference, -500);
-  assert.equal((await call('/api/admin/cash')).data.session, null);
+  // Después del arqueo la caja sigue abierta con lo contado.
+  const next = (await call('/api/admin/cash')).data.session;
+  assert.equal(next.session.closed_at, null);
+  assert.equal(next.session.opening_amount, 36500);
+  assert.equal(next.total, 0);
 });
 
 test('caja: cobro con link de Mercado Pago queda pendiente y se completa con el pago', async () => {
-  await call('/api/admin/cash/open', { method: 'POST', body: { openingAmount: 0 } });
+  await call('/api/admin/cash/close', { method: 'POST', body: { countedAmount: 0 } });
   const cr = db.one(`SELECT * FROM products WHERE sku = 'CR-1'`);
   const res = await call('/api/admin/sales', { method: 'POST', body: { items: [{ productId: cr.id, quantity: 1 }], method: 'mp_link' } });
   assert.equal(res.status, 201, JSON.stringify(res.data));

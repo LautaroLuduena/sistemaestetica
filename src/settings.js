@@ -17,6 +17,10 @@ const DEFAULTS = {
   booking_hold_min: '15', // minutos que se reserva el turno mientras se espera el pago de la seña
   booking_terms: 'La seña confirma el turno y se descuenta del total. Cancelaciones con al menos 24 hs de anticipación.',
 
+  // Ticket (comprobante no fiscal)
+  ticket_width: '80', // mm: 80 o 58 (impresoras térmicas)
+  ticket_footer: '¡Gracias por tu visita!',
+
   // Mercado Pago
   mp_access_token: '',
   mp_public_key: '',
