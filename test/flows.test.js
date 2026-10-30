@@ -720,3 +720,21 @@ test('Tienda Nube: si se autoriza sin sesión en el panel, la conexión se compl
     settings.set({ tn_client_secret: '', tn_access_token: 'tn-token', tn_store_id: '555' });
   }
 });
+
+test('clientas: alta manual, validaciones y duplicados', async () => {
+  const ok = await call('/api/admin/clients', { method: 'POST', body: { name: 'Juana Pérez', phone: '11 4000-1234', email: 'Juana@Test.com', notes: 'Piel sensible' } });
+  assert.equal(ok.status, 201);
+  assert.equal(ok.data.phone, '1140001234');
+  assert.equal(ok.data.email, 'juana@test.com');
+  assert.equal((await call('/api/admin/clients', { method: 'POST', body: { phone: '1140001235' } })).status, 400);
+  const dup = await call('/api/admin/clients', { method: 'POST', body: { name: 'Otra', phone: '(11) 4000 1234' } });
+  assert.equal(dup.status, 409);
+  assert.match(dup.data.error, /Juana Pérez/);
+  assert.equal((await call('/api/admin/clients', { method: 'POST', body: { name: 'Mal', email: 'no-es-email' } })).status, 400);
+  // Editar sin cambiar el teléfono no choca consigo misma.
+  const edit = await call(`/api/admin/clients/${ok.data.id}`, { method: 'PUT', body: { name: 'Juana P.', phone: '1140001234', email: 'juana@test.com' } });
+  assert.equal(edit.status, 200);
+  // Turno para la clienta creada: no se duplica.
+  const appt = await call('/api/admin/appointments', { method: 'POST', body: { serviceId: 1, date: addDays(day(), 8), time: '10:00', name: 'Juana P.', phone: '1140001234' } });
+  assert.equal(appt.data.client_id, ok.data.id);
+});

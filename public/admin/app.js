@@ -360,6 +360,11 @@ function newAppointmentModal(prefill = {}) {
       <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Guardar turno</button></div>
     </form>`);
   const f = $('#f', m);
+  if (prefill.client) {
+    f.name.value = prefill.client.name || '';
+    f.phone.value = prefill.client.phone || '';
+    f.email.value = prefill.client.email || '';
+  }
   const fillPrices = () => {
     const svc = services.find((x) => x.id === Number(f.serviceId.value));
     if (svc) {
@@ -1746,8 +1751,34 @@ async function discountModal() {
 
 // ---------- Clientas ----------
 
+// Link de WhatsApp para un celular argentino (agrega 549 si falta).
+function waLink(phone) {
+  let d = String(phone || '').replace(/\D/g, '').replace(/^00/, '');
+  if (!d) return null;
+  if (d.startsWith('54')) d = d.slice(2);
+  d = d.replace(/^0/, '');
+  return `https://wa.me/54${d.startsWith('9') ? d : `9${d}`}`;
+}
+
+function clientModal(c = null, onSaved = () => {}) {
+  const m = modal(`<h2>${c ? 'Editar clienta' : 'Nueva clienta'}</h2><form id="f">
+    <label>Nombre y apellido *<input name="name" required value="${esc(c ? c.name : '')}" /></label>
+    <div class="grid cols-2"><label>Teléfono (WhatsApp)<input name="phone" type="tel" value="${esc(c && c.phone ? c.phone : '')}" placeholder="11 2345 6789" /></label>
+    <label>Email<input name="email" type="email" value="${esc(c && c.email ? c.email : '')}" /></label></div>
+    <label>Notas (tipo de piel, preferencias, alergias…)<textarea name="notes" rows="3">${esc(c && c.notes ? c.notes : '')}</textarea></label>
+    <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>${c ? 'Guardar' : 'Crear clienta'}</button></div></form>`);
+  $('#f', m).onsubmit = async (e) => {
+    e.preventDefault();
+    const saved = await act(() => adminApi(c ? `/api/admin/clients/${c.id}` : '/api/admin/clients', { method: c ? 'PUT' : 'POST', body: formData(e.target) }), c ? 'Guardado' : 'Clienta creada');
+    if (saved) {
+      m.remove();
+      onSaved(saved);
+    }
+  };
+}
+
 VIEWS.clientes = async () => {
-  $('#main').innerHTML = `<div class="page-head"><h1>Clientas</h1></div>
+  $('#main').innerHTML = `<div class="page-head"><h1>Clientas</h1><button id="new-client">+ Nueva clienta</button></div>
     <div class="card"><input id="q" placeholder="Buscar por nombre, teléfono o email" style="margin-bottom:0.8rem" /><div id="list"></div></div>`;
   const load = async (q = '') => {
     const list = await adminApi(`/api/admin/clients?q=${encodeURIComponent(q)}`);
@@ -1755,12 +1786,15 @@ VIEWS.clientes = async () => {
       ? `<div class="table-wrap"><table><tr><th>Nombre</th><th>Teléfono</th><th>Email</th><th class="num">Visitas</th><th>Última</th><th></th></tr>
         ${list
           .map(
-            (c) => `<tr><td>${esc(c.name)}</td><td>${c.phone ? `<a target="_blank" href="https://wa.me/${c.phone.startsWith('54') ? c.phone : `54${c.phone}`}">${esc(c.phone)}</a>` : ''}</td>
+            (c) => `<tr><td>${esc(c.name)}${c.notes ? `<br><small class="muted">${esc(c.notes.slice(0, 60))}${c.notes.length > 60 ? '…' : ''}</small>` : ''}</td>
+            <td>${c.phone ? `<a target="_blank" href="${esc(waLink(c.phone))}">${esc(c.phone)}</a>` : ''}</td>
             <td>${esc(c.email || '')}</td><td class="num">${c.visits}</td><td>${c.last_visit ? fmtDate(c.last_visit, { day: '2-digit', month: '2-digit', year: '2-digit' }) : ''}</td>
-            <td><button class="secondary small" data-edit="${c.id}">Editar</button> <button class="secondary small" data-turnos="${esc(c.phone || c.name)}">Turnos</button></td></tr>`
+            <td style="white-space:nowrap"><button class="small" data-appt-new="${c.id}">Dar turno</button>
+              <button class="secondary small" data-edit="${c.id}">Editar</button>
+              <button class="secondary small" data-turnos="${esc(c.phone || c.name)}">Turnos</button></td></tr>`
           )
           .join('')}</table></div>`
-      : '<p class="muted">Sin resultados.</p>';
+      : `<p class="muted">${q ? 'Sin resultados.' : 'Todavía no hay clientas. Se agregan solas al reservar o comprar online, o cargalas con "+ Nueva clienta".'}</p>`;
     $$('[data-turnos]').forEach(
       (b) =>
         (b.onclick = () => {
@@ -1768,25 +1802,20 @@ VIEWS.clientes = async () => {
           location.hash = 'agenda';
         })
     );
-    $$('[data-edit]').forEach(
+    $$('[data-edit]').forEach((b) => (b.onclick = () => clientModal(list.find((x) => x.id === Number(b.dataset.edit)), () => load($('#q').value))));
+    $$('[data-appt-new]').forEach(
       (b) =>
-        (b.onclick = () => {
-          const c = list.find((x) => x.id === Number(b.dataset.edit));
-          const m = modal(`<h2>Editar clienta</h2><form id="f">
-            <label>Nombre<input name="name" required value="${esc(c.name)}" /></label>
-            <div class="grid cols-2"><label>Teléfono<input name="phone" value="${esc(c.phone || '')}" /></label><label>Email<input name="email" value="${esc(c.email || '')}" /></label></div>
-            <label>Notas (tipo de piel, preferencias…)<textarea name="notes" rows="3">${esc(c.notes || '')}</textarea></label>
-            <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button>Guardar</button></div></form>`);
-          $('#f', m).onsubmit = async (e) => {
-            e.preventDefault();
-            if (await act(() => adminApi(`/api/admin/clients/${c.id}`, { method: 'PUT', body: formData(e.target) }), 'Guardado')) {
-              m.remove();
-              load($('#q').value);
-            }
-          };
+        (b.onclick = async () => {
+          await loadServices();
+          newAppointmentModal({ client: list.find((x) => x.id === Number(b.dataset.apptNew)) });
         })
     );
   };
+  $('#new-client').onclick = () =>
+    clientModal(null, (c) => {
+      $('#q').value = c.name;
+      load(c.name);
+    });
   let t;
   $('#q').oninput = (e) => {
     clearTimeout(t);

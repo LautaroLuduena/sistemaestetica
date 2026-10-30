@@ -228,18 +228,36 @@ router.get('/clients', (req, res) => {
   );
 });
 
+function clientInput(body, id = null) {
+  const { name, phone, email, notes } = body || {};
+  const data = {
+    name: requireText(name, 'el nombre'),
+    phone: agenda.normalizePhone(phone) || null,
+    email: String(email || '').trim().toLowerCase() || null,
+    notes: String(notes || '').trim() || null,
+  };
+  if (data.phone && data.phone.length < 8) throw badRequest('El teléfono no es válido');
+  if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) throw badRequest('El email no es válido');
+  // Evita duplicados: el mismo teléfono o email ya cargado en otra clienta.
+  const byPhone = data.phone && db.one('SELECT name FROM clients WHERE phone = ? AND id IS NOT ?', data.phone, id);
+  if (byPhone) throw conflict(`Ya existe una clienta con ese teléfono: ${byPhone.name}`);
+  const byEmail = data.email && db.one('SELECT name FROM clients WHERE email = ? AND id IS NOT ?', data.email, id);
+  if (byEmail) throw conflict(`Ya existe una clienta con ese email: ${byEmail.name}`);
+  return data;
+}
+
+router.post('/clients', (req, res) => {
+  const c = clientInput(req.body);
+  const r = db.run('INSERT INTO clients (name, phone, email, notes) VALUES (?, ?, ?, ?)', c.name, c.phone, c.email, c.notes);
+  res.status(201).json(db.one('SELECT * FROM clients WHERE id = ?', Number(r.lastInsertRowid)));
+});
+
 router.put('/clients/:id', (req, res) => {
-  const { name, phone, email, notes } = req.body || {};
-  const r = db.run(
-    'UPDATE clients SET name = ?, phone = ?, email = ?, notes = ? WHERE id = ?',
-    requireText(name, 'el nombre'),
-    agenda.normalizePhone(phone) || null,
-    String(email || '').trim().toLowerCase() || null,
-    String(notes || '').trim() || null,
-    Number(req.params.id)
-  );
-  if (!r.changes) throw notFound();
-  res.json(db.one('SELECT * FROM clients WHERE id = ?', Number(req.params.id)));
+  const id = Number(req.params.id);
+  if (!db.one('SELECT 1 FROM clients WHERE id = ?', id)) throw notFound();
+  const c = clientInput(req.body, id);
+  db.run('UPDATE clients SET name = ?, phone = ?, email = ?, notes = ? WHERE id = ?', c.name, c.phone, c.email, c.notes, id);
+  res.json(db.one('SELECT * FROM clients WHERE id = ?', id));
 });
 
 // ---------- Inventario ----------
