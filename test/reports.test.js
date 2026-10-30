@@ -128,3 +128,38 @@ test('resultados: avisa los productos y servicios sin costo cargado', async () =
   assert.equal(r.extra.servicesWithoutCost, 1);
   assert.equal(r.services.find((s) => s.name === 'Sin costo').missingCost, true);
 });
+
+test('resultados: el servicio se mide por su precio de venta el día del turno, no por la seña', async () => {
+  const today = nowInTz(settings.get('timezone')).date;
+  const day = addDays(today, 10);
+  const svc = (await call('/api/admin/services', { method: 'POST', body: { name: 'Masaje', duration_min: 30, price: 20000, deposit_amount: 5000, cost: 5000 } })).data;
+  const mk = async (date, time, name) =>
+    (await call('/api/admin/appointments', { method: 'POST', body: { serviceId: svc.id, date, time, name, phone: `11${Math.floor(Math.random() * 1e8)}`, force: true } })).data;
+
+  // Turno atendido: pagó la seña y se marcó atendido sin cobrar el saldo en la caja.
+  const a1 = await mk(day, '10:00', 'Paula');
+  await call(`/api/admin/appointments/${a1.id}/deposit`, { method: 'POST', body: { amount: 5000, method: 'efectivo' } });
+  await call(`/api/admin/appointments/${a1.id}/status`, { method: 'POST', body: { status: 'completed' } });
+  // No vino: la seña queda como ingreso, sin costo.
+  const a2 = await mk(day, '11:00', 'Rocío');
+  await call(`/api/admin/appointments/${a2.id}/deposit`, { method: 'POST', body: { amount: 5000, method: 'efectivo' } });
+  await call(`/api/admin/appointments/${a2.id}/status`, { method: 'POST', body: { status: 'no_show' } });
+  // Turno futuro con seña: todavía no es ingreso.
+  const a3 = await mk(addDays(day, 1), '10:00', 'Sol');
+  await call(`/api/admin/appointments/${a3.id}/deposit`, { method: 'POST', body: { amount: 5000, method: 'efectivo' } });
+
+  const r = (await call(`/api/admin/reports/results?from=${day}&to=${day}`)).data;
+  const masaje = r.services.find((s) => s.name === 'Masaje');
+  assert.equal(masaje.units, 1);
+  assert.equal(masaje.revenue, 25000); // 20.000 del turno atendido + 5.000 de la seña retenida
+  assert.equal(masaje.cost, 5000);
+  assert.equal(r.extra.retainedDeposits, 5000);
+
+  const onlyAttended = (await call(`/api/admin/reports/results?from=${day}&to=${day}`)).data.totals;
+  assert.equal(onlyAttended.revenue, 25000);
+
+  // Hoy no hay ingreso por esas señas: se informan como cobradas por adelantado.
+  const t = (await call(`/api/admin/reports/results?from=${today}&to=${today}`)).data;
+  assert.ok(!t.services.some((s) => s.name === 'Masaje'));
+  assert.equal(t.extra.advanceDeposits, 5000);
+});

@@ -5,9 +5,11 @@ const { badRequest, round2, isDate, addDays, utcRange, localDateOf } = require('
 /**
  * Informe de resultados del negocio para un período (fechas locales, inclusive).
  *
- * Criterio: los ingresos se cuentan cuando se cobran (ventas cobradas, señas, ventas web pagadas).
- *  - Servicios: señas + saldos cobrados + servicios vendidos en caja. Su costo (insumos) se cuenta
- *    por cada turno atendido en el período, con el costo que tenía el servicio en ese momento.
+ * Criterio:
+ *  - Servicios con turno: se cuentan el día del turno atendido, por su precio de venta (seña + saldo
+ *    cobrado, con descuentos) y con el costo de insumos que tenía el servicio en ese momento.
+ *    Las señas de turnos futuros no son ingreso todavía (se informan aparte).
+ *  - Servicios vendidos en la caja sin turno: el día que se cobran.
  *  - Productos: precio cobrado (con descuentos) menos el costo del producto al momento de la venta.
  *  - Gastos: los cargados en Gastos y los egresos de caja.
  */
@@ -21,14 +23,11 @@ function build(from, to, { compare = true } = {}) {
   // A. Ventas cobradas en la caja (el descuento de la venta se reparte entre sus ítems).
   const saleRows = db.all(
     `SELECT si.*, s.subtotal AS s_subtotal, s.discount AS s_discount, s.paid_at,
-            p.cost AS p_cost, p.name AS p_name, sv.cost AS sv_cost, sv.name AS sv_name,
-            ap.service_id AS ap_service_id, aps.name AS ap_service_name
+            p.cost AS p_cost, p.name AS p_name, sv.cost AS sv_cost, sv.name AS sv_name
      FROM sale_items si
      JOIN sales s ON s.id = si.sale_id
      LEFT JOIN products p ON p.id = si.product_id
      LEFT JOIN services sv ON sv.id = si.service_id
-     LEFT JOIN appointments ap ON ap.id = si.appointment_id
-     LEFT JOIN services aps ON aps.id = ap.service_id
      WHERE s.status = 'paid' AND s.paid_at BETWEEN ? AND ?`,
     start,
     end
@@ -45,8 +44,7 @@ function build(from, to, { compare = true } = {}) {
       const unitCost = r.unit_cost ?? r.p_cost;
       lines.push({ date, channel: 'local_products', key: `p:${r.product_id}`, name: r.p_name || r.description, revenue, cost: unitCost === null ? 0 : unitCost * r.quantity, units: r.quantity, missingCost: unitCost === null });
     } else if (r.appointment_id) {
-      // Saldo de un turno: el costo se cuenta con el turno atendido (punto C).
-      lines.push({ date, channel: 'services', key: `s:${r.ap_service_id}`, name: r.ap_service_name, revenue, cost: 0, units: 0, missingCost: false });
+      // Saldo de un turno: el ingreso del servicio se cuenta con el turno atendido (punto C).
     } else if (r.service_id) {
       const unitCost = r.unit_cost ?? r.sv_cost;
       lines.push({ date, channel: 'services', key: `s:${r.service_id}`, name: r.sv_name || r.description, revenue, cost: unitCost === null ? 0 : unitCost * r.quantity, units: r.quantity, missingCost: unitCost === null });
@@ -55,30 +53,51 @@ function build(from, to, { compare = true } = {}) {
     }
   }
 
-  // B. Señas cobradas (online o en el local) y devoluciones de señas.
-  const deposits = db.all(
-    `SELECT m.amount, m.created_at, ap.service_id, ap.date AS appt_date, s.name
-     FROM cash_movements m JOIN appointments ap ON ap.id = m.appointment_id JOIN services s ON s.id = ap.service_id
-     WHERE m.type IN ('deposit', 'refund') AND m.created_at BETWEEN ? AND ?`,
-    start,
-    end
-  );
+  // B. Señas cobradas en el período de turnos que todavía no llegaron (dato informativo:
+  //    se cuentan como ingreso cuando se atiende el turno).
   let advanceDeposits = 0;
-  for (const d of deposits) {
-    lines.push({ date: localDateOf(d.created_at, tz), channel: 'services', key: `s:${d.service_id}`, name: d.name, revenue: round2(d.amount), cost: 0, units: 0, missingCost: false });
-    if (d.amount > 0 && d.appt_date > to) advanceDeposits += d.amount;
+  for (const d of db.all(
+    `SELECT m.amount FROM cash_movements m JOIN appointments ap ON ap.id = m.appointment_id
+     WHERE m.type = 'deposit' AND m.created_at BETWEEN ? AND ? AND ap.date > ? AND ap.status IN ('confirmed', 'pending_payment')`,
+    start,
+    end,
+    to
+  )) {
+    advanceDeposits += d.amount;
   }
 
-  // C. Turnos atendidos: una sesión por turno, con el costo de insumos del servicio.
-  const attended = db.all(
-    `SELECT ap.date, ap.service_id, s.name, COALESCE(ap.service_cost, s.cost) AS cost
+  // C. Servicios con turno: se cuentan el día del turno atendido, por su precio de venta
+  //    (seña + saldo cobrado, con descuentos) y con su costo de insumos.
+  //    Si el turno se marcó atendido sin cobrar el saldo en la caja, se toma el precio del servicio.
+  //    Las señas que se quedan por ausencias o cancelaciones sin devolución también son ingreso.
+  const appts = db.all(
+    `SELECT ap.id, ap.date, ap.status, ap.price, ap.deposit_paid, ap.service_id, s.name, COALESCE(ap.service_cost, s.cost) AS cost
      FROM appointments ap JOIN services s ON s.id = ap.service_id
-     WHERE ap.status = 'completed' AND ap.date BETWEEN ? AND ?`,
+     WHERE ap.date BETWEEN ? AND ? AND (ap.status = 'completed' OR (ap.status IN ('no_show', 'cancelled') AND ap.deposit_paid > 0))`,
     from,
     to
   );
-  for (const a of attended) {
-    lines.push({ date: a.date, channel: 'services', key: `s:${a.service_id}`, name: a.name, revenue: 0, cost: a.cost ?? 0, units: 1, missingCost: a.cost === null });
+  const balances = new Map(
+    db
+      .all(
+        `SELECT si.appointment_id, SUM(si.subtotal * CASE WHEN s.subtotal > 0 THEN 1 - s.discount / s.subtotal ELSE 1 END) AS net
+         FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN appointments ap ON ap.id = si.appointment_id
+         WHERE s.status = 'paid' AND ap.date BETWEEN ? AND ? GROUP BY si.appointment_id`,
+        from,
+        to
+      )
+      .map((b) => [b.appointment_id, b.net])
+  );
+  const attended = appts.filter((a) => a.status === 'completed');
+  let retainedDeposits = 0;
+  for (const a of appts) {
+    if (a.status !== 'completed') {
+      retainedDeposits += a.deposit_paid;
+      lines.push({ date: a.date, channel: 'services', key: `s:${a.service_id}`, name: a.name, revenue: round2(a.deposit_paid), cost: 0, units: 0, missingCost: false });
+      continue;
+    }
+    const revenue = balances.has(a.id) ? a.deposit_paid + balances.get(a.id) : Math.max(a.price, a.deposit_paid);
+    lines.push({ date: a.date, channel: 'services', key: `s:${a.service_id}`, name: a.name, revenue: round2(revenue), cost: a.cost ?? 0, units: 1, missingCost: a.cost === null });
   }
 
   // D. Ventas de la tienda online pagadas (el envío cobrado no se cuenta como ingreso).
@@ -223,6 +242,7 @@ function build(from, to, { compare = true } = {}) {
       webOrders: orders.length,
       avgTicket: salesCount ? round2(ticketRevenue / salesCount) : 0,
       advanceDeposits: round2(advanceDeposits),
+      retainedDeposits: round2(retainedDeposits),
       shippingCharged: round2(shippingCharged),
       productsWithoutCost: products.filter((p) => p.missingCost).length,
       servicesWithoutCost: services.filter((s) => s.missingCost).length,

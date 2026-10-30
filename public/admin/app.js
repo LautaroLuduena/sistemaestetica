@@ -1165,7 +1165,7 @@ async function renderResults(from, to) {
         : ''
     }
     <div class="grid kpis">
-      ${tile('Ingresos', fmtMoney(t.revenue), 'lo cobrado en el período', delta(t.revenue, p.revenue))}
+      ${tile('Ingresos', fmtMoney(t.revenue), 'ventas y turnos atendidos', delta(t.revenue, p.revenue))}
       ${tile('Costo de lo vendido', fmtMoney(t.cost), 'productos + insumos de servicios', delta(t.cost, p.cost, { invert: true }))}
       ${tile('Ganancia bruta', fmtMoney(t.gross), `margen ${pct(t.grossMargin)}`, delta(t.gross, p.gross))}
       ${tile('Gastos', fmtMoney(t.expenses), 'alquiler, sueldos, servicios…', delta(t.expenses, p.expenses, { invert: true }))}
@@ -1199,7 +1199,8 @@ async function renderResults(from, to) {
         <div class="summary-line"><span>Ventas (local + web)</span><b>${r.extra.salesCount}</b></div>
         <div class="summary-line"><span>Ticket promedio</span><b>${fmtMoney(r.extra.avgTicket)}</b></div>
         <div class="summary-line"><span>Ventas en la tienda online</span><b>${r.extra.webOrders}</b></div>
-        ${r.extra.advanceDeposits ? `<div class="summary-line"><span>Señas cobradas de turnos futuros <small class="muted">(incluidas en ingresos)</small></span><b>${fmtMoney(r.extra.advanceDeposits)}</b></div>` : ''}
+        ${r.extra.advanceDeposits ? `<div class="summary-line"><span>Señas cobradas de turnos futuros <small class="muted">(se cuentan cuando se atiende el turno)</small></span><b>${fmtMoney(r.extra.advanceDeposits)}</b></div>` : ''}
+        ${r.extra.retainedDeposits ? `<div class="summary-line"><span>Señas retenidas por ausencias o cancelaciones</span><b>${fmtMoney(r.extra.retainedDeposits)}</b></div>` : ''}
         ${r.extra.shippingCharged ? `<div class="summary-line"><span>Envíos cobrados a clientes <small class="muted">(no se cuentan como ingreso)</small></span><b>${fmtMoney(r.extra.shippingCharged)}</b></div>` : ''}
       </div>
     </div>
@@ -1214,7 +1215,8 @@ async function renderResults(from, to) {
               <td class="num">${fmtMoney(s.cost)}</td><td class="num">${fmtMoney(s.gross)}</td><td class="num">${marginCell(s.margin, s.missingCost)}</td></tr>`
             )
             .join('')}</table></div>
-          <p class="muted" style="margin-bottom:0">Ingresos: señas y saldos cobrados en el período. Sesiones y costo: turnos atendidos en el período.</p>`
+          <p class="muted" style="margin-bottom:0">Cada turno atendido se cuenta por su precio de venta (seña + saldo, con descuentos) y su costo de insumos, el día del turno.
+          Si se marcó atendido sin cobrar el saldo en la caja, se toma el precio del servicio. Las señas de turnos futuros todavía no son ingreso.</p>`
           : '<p class="muted">Sin servicios en el período.</p>'
       }
     </div>
