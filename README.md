@@ -104,6 +104,8 @@ Todo se carga desde **Inventario** y se publica completo en Tienda Nube, sin ten
 - **Peso y medidas** (alto, ancho, profundidad): obligatorios para publicar, Tienda Nube los usa para calcular el envío. Opción de envío gratis.
 - **Precios y descuentos**: el botón *Precios y descuentos* permite, para todo el inventario o una categoría, **aumentar o bajar precios** por porcentaje o por monto fijo (ej. +$10 o +10%), con redondeo opcional a $10, $50 o $100; **poner un descuento** (precio promocional, por % o por monto: en la web se ve el precio anterior tachado y la caja cobra el promocional) o **quitar los descuentos**.
 
+- **Exportar / importar**: *Exportar* descarga todos los artículos en una planilla de Excel (una fila por variante, con categoría, precios, costo, stock, medidas, links de fotos, etc.). Se puede editar y volver a subir con *Importar*, o usar la *planilla modelo* para cargar muchos artículos nuevos de una vez (también acepta .csv). Antes de guardar se muestra una vista previa con los artículos nuevos, los que se actualizan y las filas con errores. Los artículos se reconocen por ID, SKU o nombre; las celdas vacías no cambian lo cargado y los cambios de stock quedan como ajuste "Importación de planilla".
+
 Si se cambian los tipos de variante de un artículo ya publicado (por ejemplo, se le agrega "Color"), Tienda Nube no permite transformarlo, así que el sistema vuelve a publicar el producto.
 
 La app de Tienda Nube necesita permisos de **Products** (lectura y escritura) y **Orders** (lectura).
@@ -159,6 +161,7 @@ src/
     tiendanube.js      cliente y sincronización con Tienda Nube
     weborders.js       ventas web (órdenes de Tienda Nube)
     inventory.js       categorías, artículos, variantes, fotos y descuentos
+    articlesio.js      exportar / importar artículos (Excel / CSV)
     reports.js         informe de resultados (ingresos, costos, gastos, ganancias)
     expenses.js        gastos del negocio
     stock.js           movimientos de stock

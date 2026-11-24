@@ -15,6 +15,7 @@
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
+    "exceljs": "^4.4.0",
     "express": "^5.3.0",
     "qrcode": "^1.5.4"
   }

@@ -1627,7 +1627,8 @@ VIEWS.inventario = async () => {
   const tab = app.query.get('tab') || 'articulos';
   $('#main').innerHTML = `
     <div class="page-head"><h1>Inventario</h1>
-      <div class="row"><button class="secondary" id="discount">Precios y descuentos</button><button id="new">+ Nuevo artículo</button></div></div>
+      <div class="row"><button class="secondary" id="export">Exportar</button><button class="secondary" id="import">Importar</button>
+        <button class="secondary" id="discount">Precios y descuentos</button><button id="new">+ Nuevo artículo</button></div></div>
     <div class="tabs">${[['articulos', 'Artículos'], ['categorias', 'Categorías'], ['movimientos', 'Movimientos de stock']]
       .map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`)
       .join('')}</div>
@@ -1635,6 +1636,8 @@ VIEWS.inventario = async () => {
   $$('[data-tab]').forEach((b) => (b.onclick = () => (location.hash = `inventario?tab=${b.dataset.tab}`)));
   $('#new').onclick = () => articleModal();
   $('#discount').onclick = () => discountModal();
+  $('#export').onclick = () => (location.href = '/api/admin/articles/export');
+  $('#import').onclick = () => importModal();
   if (tab === 'categorias') return renderCategories();
   if (tab === 'movimientos') {
     const list = await adminApi('/api/admin/stock-movements?limit=500');
@@ -2212,6 +2215,72 @@ async function renderCategories() {
         if (await act(() => adminApi(`/api/admin/categories/${b.dataset.del}`, { method: 'DELETE' }), 'Categoría eliminada')) renderCategories();
       })
   );
+}
+
+// Importar artículos desde Excel (.xlsx) o CSV: primero vista previa, después se confirma.
+function importModal() {
+  const m = modal(`<h2>Importar artículos</h2>
+    <p>Usá la planilla que descargás con <b>Exportar</b> (para editar lo que ya tenés) o la
+      <a href="/api/admin/articles/template">planilla modelo</a> (para cargar artículos nuevos). Las instrucciones están en la segunda hoja.</p>
+    <ul class="muted" style="margin-top:0">
+      <li>Una fila por artículo, o por variante repitiendo el nombre.</li>
+      <li>Los artículos se reconocen por el ID, el SKU o el nombre; si no existen se crean.</li>
+      <li>Las celdas vacías no cambian lo que ya está cargado. Los artículos que no estén en la planilla no se tocan.</li>
+    </ul>
+    <label>Archivo (.xlsx o .csv)<input type="file" id="imp-file" accept=".xlsx,.csv" /></label>
+    <div id="imp-result"></div>
+    <div class="actions"><button class="secondary" data-close>Cancelar</button><button id="imp-check" disabled>Revisar planilla</button><button id="imp-go" class="hidden">Importar</button></div>`);
+  let payload = null;
+  const input = $('#imp-file', m);
+  input.onchange = () => {
+    const file = input.files[0];
+    $('#imp-result', m).innerHTML = '';
+    $('#imp-go', m).classList.add('hidden');
+    $('#imp-check', m).classList.remove('hidden');
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      payload = { file: reader.result, filename: file.name };
+      $('#imp-check', m).disabled = false;
+    };
+    reader.readAsDataURL(file);
+  };
+  const summary = (r, done) => `
+    <div class="alert ${r.errors.length ? 'warn' : 'ok'}">
+      ${done ? '<b>Importación terminada.</b><br>' : ''}
+      ${r.created ? `${r.created} artículo(s) ${done ? 'creados' : 'nuevos'}` : ''}${r.created && r.updated ? ' · ' : ''}${r.updated ? `${r.updated} artículo(s) ${done ? 'actualizados' : 'a actualizar'}` : ''}
+      ${!r.created && !r.updated ? 'Ningún artículo para importar.' : ''}
+      ${r.errors.length ? `<br>${r.errors.length} artículo(s) con errores ${done ? 'no se importaron' : 'no se van a importar'}:` : ''}
+    </div>
+    ${
+      r.errors.length
+        ? `<div class="table-wrap" style="max-height:220px;overflow:auto"><table><tr><th>Fila</th><th>Artículo</th><th>Problema</th></tr>
+          ${r.errors.map((e) => `<tr><td>${e.rows.join(', ')}</td><td>${esc(e.name)}</td><td>${esc(e.message)}</td></tr>`).join('')}</table></div>`
+        : ''
+    }`;
+  $('#imp-check', m).onclick = async () => {
+    $('#imp-check', m).disabled = true;
+    $('#imp-check', m).textContent = 'Revisando…';
+    const r = await act(() => adminApi('/api/admin/articles/import', { method: 'POST', body: { ...payload, dryRun: true } }));
+    $('#imp-check', m).disabled = false;
+    $('#imp-check', m).textContent = 'Revisar planilla';
+    if (!r) return;
+    $('#imp-result', m).innerHTML = summary(r, false);
+    if (r.created || r.updated) {
+      $('#imp-check', m).classList.add('hidden');
+      $('#imp-go', m).classList.remove('hidden');
+      $('#imp-go', m).textContent = `Importar ${r.created + r.updated} artículo(s)`;
+    }
+  };
+  $('#imp-go', m).onclick = async () => {
+    $('#imp-go', m).disabled = true;
+    const r = await act(() => adminApi('/api/admin/articles/import', { method: 'POST', body: { ...payload, dryRun: false } }));
+    $('#imp-go', m).disabled = false;
+    if (!r) return;
+    $('#imp-result', m).innerHTML = summary(r, true);
+    $('#imp-go', m).classList.add('hidden');
+    if (app.view === 'inventario') renderArticles();
+  };
 }
 
 async function discountModal() {

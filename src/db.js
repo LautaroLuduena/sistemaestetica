@@ -431,21 +431,27 @@ function get() {
   return db;
 }
 
-// Runs fn inside a transaction. Nested calls reuse the outer transaction.
+// Ejecuta fn dentro de una transacción. Las llamadas anidadas usan un SAVEPOINT:
+// si fallan, se deshace solo lo suyo y el error sigue hacia arriba.
 let depth = 0;
 function tx(fn) {
   const conn = get();
-  if (depth > 0) return fn(conn);
-  conn.exec('BEGIN IMMEDIATE');
+  const savepoint = depth > 0 ? `sp_${depth}` : null;
+  conn.exec(savepoint ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE');
   depth++;
   try {
     const result = fn(conn);
     depth--;
-    conn.exec('COMMIT');
+    conn.exec(savepoint ? `RELEASE ${savepoint}` : 'COMMIT');
     return result;
   } catch (err) {
     depth--;
-    conn.exec('ROLLBACK');
+    if (savepoint) {
+      conn.exec(`ROLLBACK TO ${savepoint}`);
+      conn.exec(`RELEASE ${savepoint}`);
+    } else {
+      conn.exec('ROLLBACK');
+    }
     throw err;
   }
 }

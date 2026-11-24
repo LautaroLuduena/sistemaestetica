@@ -11,6 +11,12 @@ const IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'we
 // Se setea desde server.js (envío a Tienda Nube) para evitar dependencias circulares.
 let onArticleChange = () => {};
 let onRemoteDelete = () => {};
+// Durante la vista previa de una importación no se avisa nada a Tienda Nube.
+let muted = false;
+const setMuted = (v) => {
+  muted = v;
+};
+const isMuted = () => muted;
 function setListeners({ articleChanged, remoteDelete }) {
   if (articleChanged) onArticleChange = articleChanged;
   if (remoteDelete) onRemoteDelete = remoteDelete;
@@ -198,7 +204,7 @@ const optNum = (v, field) => {
   return round2(n);
 };
 
-function validate(input) {
+function validate(input, { requireImages = true } = {}) {
   const name = String(input.name || '').trim();
   if (!name) throw badRequest('Ingresá el nombre del artículo');
   const categoryId = Number(input.categoryId) || null;
@@ -248,7 +254,7 @@ function validate(input) {
   });
 
   const images = Array.isArray(input.images) ? input.images : [];
-  if (!images.length) throw badRequest('Agregá al menos una foto del artículo');
+  if (!images.length && requireImages) throw badRequest('Agregá al menos una foto del artículo');
   if (images.length > MAX_IMAGES) throw badRequest(`Se pueden cargar hasta ${MAX_IMAGES} fotos`);
 
   const publishOnline = input.publishOnline === false || input.publishOnline === 0 ? 0 : 1;
@@ -284,8 +290,8 @@ function validate(input) {
  * Crea o actualiza un artículo con sus variantes y fotos.
  * Los cambios de stock hechos desde la ficha quedan registrados como ajustes.
  */
-function saveArticle(input, { id = null, userId = null } = {}) {
-  const data = validate(input || {});
+function saveArticle(input, { id = null, userId = null, requireImages = true, stockReason = 'Edición del artículo' } = {}) {
+  const data = validate(input || {}, { requireImages });
   const newFiles = [];
   try {
     const articleId = db.tx(() => {
@@ -331,7 +337,7 @@ function saveArticle(input, { id = null, userId = null } = {}) {
           );
           pid = current.id;
           if (current.stock !== v.stock) {
-            stock.change(pid, { setTo: v.stock, type: 'adjustment', reason: 'Edición del artículo', userId, source: 'inventory' });
+            stock.change(pid, { setTo: v.stock, type: 'adjustment', reason: stockReason, userId, source: 'inventory' });
           }
         } else {
           const res = db.run(
@@ -358,6 +364,11 @@ function saveArticle(input, { id = null, userId = null } = {}) {
           if (!row) throw badRequest('Una de las fotos no pertenece a este artículo');
           db.run('UPDATE article_images SET position = ? WHERE id = ?', position, row.id);
           keepImages.add(row.id);
+        } else if (img.url) {
+          // Foto por link (importación desde planilla o Tienda Nube).
+          if (!/^https?:\/\/\S+$/i.test(img.url)) throw badRequest(`El link de la foto no es válido: ${img.url}`);
+          const res = db.run('INSERT INTO article_images (article_id, url, position) VALUES (?, ?, ?)', aid, img.url, position);
+          keepImages.add(Number(res.lastInsertRowid));
         } else {
           const filename = saveImageData(img.data);
           newFiles.push(filename);
@@ -372,7 +383,7 @@ function saveArticle(input, { id = null, userId = null } = {}) {
       }
       return aid;
     });
-    onArticleChange(articleId, { full: true });
+    if (!muted) onArticleChange(articleId, { full: true });
     return getArticle(articleId);
   } catch (err) {
     // Si algo falló, se borran las fotos que se alcanzaron a guardar.
@@ -522,6 +533,8 @@ module.exports = {
   deleteArticle,
   applyDiscount,
   applyPriceChange,
+  setMuted,
+  isMuted,
   sellableProducts,
   readImage,
   imageUrl,

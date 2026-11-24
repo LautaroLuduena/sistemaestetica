@@ -12,6 +12,7 @@ const tn = require('../services/tiendanube');
 const whatsapp = require('../services/whatsapp');
 const weborders = require('../services/weborders');
 const inventory = require('../services/inventory');
+const articlesio = require('../services/articlesio');
 const expenses = require('../services/expenses');
 const reports = require('../services/reports');
 const { recent } = require('../services/log');
@@ -283,6 +284,26 @@ router.delete('/categories/:id', (req, res) => res.json(inventory.deleteCategory
 router.get('/articles', (req, res) => {
   const { q, categoryId, status } = req.query;
   res.json({ articles: inventory.listArticles({ q, categoryId, status }), tnConnected: tn.isConfigured() });
+});
+
+// Exportar / importar artículos (planilla Excel)
+const sendXlsx = (res, buffer, name) => {
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.send(Buffer.from(buffer));
+};
+
+router.get('/articles/export', async (req, res) => sendXlsx(res, await articlesio.exportXlsx(), `articulos-${nowInTz(settings.get('timezone')).date}.xlsx`));
+
+router.get('/articles/template', async (req, res) => sendXlsx(res, await articlesio.templateXlsx(), 'planilla-modelo-articulos.xlsx'));
+
+router.post('/articles/import', async (req, res) => {
+  const { file, filename, dryRun } = req.body || {};
+  const m = /^data:[^;]*;base64,(.+)$/.exec(String(file || ''));
+  if (!m) throw badRequest('Elegí un archivo .xlsx o .csv');
+  const buffer = Buffer.from(m[1], 'base64');
+  if (buffer.length > 15 * 1024 * 1024) throw badRequest('El archivo es demasiado grande (máximo 15 MB)');
+  res.json(await articlesio.importFile(buffer, filename, { dryRun: dryRun !== false, userId: uid(req) }));
 });
 
 router.get('/articles/:id', (req, res) => res.json(inventory.getArticle(Number(req.params.id))));

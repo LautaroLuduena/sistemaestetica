@@ -96,10 +96,12 @@ function createApp() {
 function bootstrap({ dbFile } = {}) {
   db.init(dbFile);
   seed();
-  stock.setChangeListener((productId, opts) => tn.schedulePush(productId, opts));
-  require('./services/inventory').setListeners({
-    articleChanged: (articleId) => tn.scheduleArticle(articleId),
-    remoteDelete: (remotePath) => tn.queueRemoteDelete(remotePath),
+  const inventory = require('./services/inventory');
+  // Durante la vista previa de una importación (inventory muteado) no se envía nada a Tienda Nube.
+  stock.setChangeListener((productId, opts) => !inventory.isMuted() && tn.schedulePush(productId, opts));
+  inventory.setListeners({
+    articleChanged: (articleId) => !inventory.isMuted() && tn.scheduleArticle(articleId),
+    remoteDelete: (remotePath) => !inventory.isMuted() && tn.queueRemoteDelete(remotePath),
   });
   return createApp();
 }
