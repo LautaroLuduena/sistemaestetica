@@ -299,6 +299,12 @@ router.post('/articles/:id/sync', async (req, res) => {
 });
 
 // Descuento por porcentaje (todo, una categoría o artículos elegidos). 0 = quitar descuento.
+// Cambio masivo de precios: aumentar, bajar, poner descuento o quitarlo (por % o por monto fijo).
+router.post('/articles/prices', (req, res) => {
+  const { action, kind, value, categoryId, articleIds, round } = req.body || {};
+  res.json(inventory.applyPriceChange({ action, kind, value, categoryId: categoryId || null, articleIds, round }));
+});
+
 router.post('/articles/discount', (req, res) => {
   const { percent, categoryId, articleIds } = req.body || {};
   res.json(inventory.applyDiscount({ percent, categoryId: categoryId || null, articleIds }));

@@ -102,7 +102,7 @@ Todo se carga desde **Inventario** y se publica completo en Tienda Nube, sin ten
 - **Fotos**: de 1 a 3 por artículo (obligatoria al menos una); se achican en el navegador antes de subir y se guardan en el volumen (`/data/uploads`).
 - **Variantes**: hasta 3 tipos (ej. Tamaño, Color), con precio, precio promocional, stock, SKU y peso por variante.
 - **Peso y medidas** (alto, ancho, profundidad): obligatorios para publicar, Tienda Nube los usa para calcular el envío. Opción de envío gratis.
-- **Descuentos**: el botón *% Descuentos* aplica un porcentaje a todo el inventario o a una categoría como precio promocional (en la web se ve el precio anterior tachado). La caja cobra el precio promocional.
+- **Precios y descuentos**: el botón *Precios y descuentos* permite, para todo el inventario o una categoría, **aumentar o bajar precios** por porcentaje o por monto fijo (ej. +$10 o +10%), con redondeo opcional a $10, $50 o $100; **poner un descuento** (precio promocional, por % o por monto: en la web se ve el precio anterior tachado y la caja cobra el promocional) o **quitar los descuentos**.
 
 Si se cambian los tipos de variante de un artículo ya publicado (por ejemplo, se le agrega "Color"), Tienda Nube no permite transformarlo, así que el sistema vuelve a publicar el producto.
 

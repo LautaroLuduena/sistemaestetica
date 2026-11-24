@@ -1627,7 +1627,7 @@ VIEWS.inventario = async () => {
   const tab = app.query.get('tab') || 'articulos';
   $('#main').innerHTML = `
     <div class="page-head"><h1>Inventario</h1>
-      <div class="row"><button class="secondary" id="discount">% Descuentos</button><button id="new">+ Nuevo artículo</button></div></div>
+      <div class="row"><button class="secondary" id="discount">Precios y descuentos</button><button id="new">+ Nuevo artículo</button></div></div>
     <div class="tabs">${[['articulos', 'Artículos'], ['categorias', 'Categorías'], ['movimientos', 'Movimientos de stock']]
       .map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`)
       .join('')}</div>
@@ -2216,33 +2216,86 @@ async function renderCategories() {
 
 async function discountModal() {
   const tree = await adminApi('/api/admin/categories');
-  const m = modal(`<h2>Descuentos</h2>
-    <p class="muted">Se aplica como <b>precio promocional</b>: en la tienda online se muestra el precio anterior tachado, y la caja cobra el precio con descuento.</p>
+  const m = modal(`<h2>Precios y descuentos</h2>
     <form id="df">
-      <label>¿A qué artículos?<select name="categoryId"><option value="">Todo el inventario</option>${categoryOptions(tree)}</select></label>
-      <label>Descuento (%)<input name="percent" type="number" min="1" max="99" step="1" placeholder="Ej: 15" /></label>
-      <div class="actions">
-        <button type="button" class="danger" id="clear">Quitar descuentos</button>
-        <button type="button" class="secondary" data-close>Cancelar</button><button>Aplicar descuento</button>
+      <label>¿Qué querés hacer?<select name="action">
+        <option value="increase">Aumentar precios</option>
+        <option value="decrease">Bajar precios</option>
+        <option value="discount">Poner un descuento (precio promocional)</option>
+        <option value="clear">Quitar los descuentos</option>
+      </select></label>
+      <div id="amount-row" class="grid cols-2">
+        <label>¿Cuánto?<input name="value" type="number" min="0" step="0.01" placeholder="Ej: 10" /></label>
+        <label>En<select name="kind"><option value="percent">Porcentaje (%)</option><option value="amount">Pesos ($)</option></select></label>
       </div>
+      <label id="round-row">Redondear el resultado<select name="round">
+        <option value="1">No redondear</option><option value="10">A $10</option><option value="50">A $50</option><option value="100" selected>A $100</option>
+      </select></label>
+      <label>¿A qué artículos?<select name="categoryId"><option value="">Todo el inventario</option>${categoryOptions(tree)}</select></label>
+      <div class="alert info" id="preview"></div>
+      <p class="muted" id="help"></p>
+      <div class="actions"><button type="button" class="secondary" data-close>Cancelar</button><button id="apply">Aplicar</button></div>
     </form>`);
   const f = $('#df', m);
-  const apply = async (percent) => {
+  const calc = (price) => {
+    const v = Number(f.value.value) || 0;
+    const sign = f.action.value === 'increase' ? 1 : -1;
+    const raw = f.kind.value === 'percent' ? price * (1 + (sign * v) / 100) : price + sign * v;
+    const step = Number(f.round.value);
+    return step === 1 ? Math.round(raw * 100) / 100 : Math.round(raw / step) * step;
+  };
+  const update = () => {
+    const action = f.action.value;
+    const clear = action === 'clear';
+    $('#amount-row', m).classList.toggle('hidden', clear);
+    $('#round-row', m).classList.toggle('hidden', clear);
+    $('#help', m).textContent = {
+      increase: 'Cambia el precio normal. Si el artículo tenía un descuento, el precio promocional se mantiene.',
+      decrease: 'Cambia el precio normal. Si queda por debajo del precio promocional, el descuento se quita.',
+      discount: 'En la tienda online se muestra el precio anterior tachado, y la caja cobra el precio con descuento.',
+      clear: 'Todos los artículos elegidos vuelven a su precio normal.',
+    }[action];
+    $('#apply', m).textContent = { increase: 'Aumentar precios', decrease: 'Bajar precios', discount: 'Aplicar descuento', clear: 'Quitar descuentos' }[action];
+    const v = Number(f.value.value) || 0;
+    const preview = $('#preview', m);
+    if (clear || !v) {
+      preview.classList.add('hidden');
+      return;
+    }
+    preview.classList.remove('hidden');
+    const ex = 10000;
+    const result = calc(ex);
+    preview.textContent =
+      action === 'discount' ? `Ejemplo: un artículo de ${fmtMoney(ex)} queda en promoción a ${fmtMoney(result)}.` : `Ejemplo: un artículo de ${fmtMoney(ex)} pasa a costar ${fmtMoney(result)}.`;
+  };
+  f.oninput = update;
+  f.onchange = update;
+  update();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const action = f.action.value;
+    const value = Number(f.value.value);
+    if (action !== 'clear' && !(value > 0)) return toast('Ingresá cuánto querés cambiar', 'error');
     const scope = f.categoryId.value ? `la categoría "${f.categoryId.selectedOptions[0].textContent.replace('›', '').trim()}"` : 'todo el inventario';
-    if (!confirm(percent ? `¿Aplicar ${percent}% de descuento a ${scope}?` : `¿Quitar los precios promocionales de ${scope}?`)) return;
-    const r = await act(() => adminApi('/api/admin/articles/discount', { method: 'POST', body: { percent, categoryId: f.categoryId.value || null } }));
+    const amount = f.kind.value === 'percent' ? `${value}%` : fmtMoney(value);
+    const question = {
+      increase: `¿Aumentar ${amount} los precios de ${scope}?`,
+      decrease: `¿Bajar ${amount} los precios de ${scope}?`,
+      discount: `¿Poner ${amount} de descuento a ${scope}?`,
+      clear: `¿Quitar los descuentos de ${scope}?`,
+    }[action];
+    if (!confirm(question)) return;
+    const r = await act(() =>
+      adminApi('/api/admin/articles/prices', {
+        method: 'POST',
+        body: { action, kind: f.kind.value, value, round: f.round.value, categoryId: f.categoryId.value || null },
+      })
+    );
     if (!r) return;
-    toast(`${percent ? 'Descuento aplicado' : 'Descuentos quitados'}: ${r.articles} artículo(s), ${r.variants} variante(s)`);
+    toast(`Listo: ${r.variants} precio(s) actualizado(s)${r.skipped ? `, ${r.skipped} sin cambios (el resultado no era válido)` : ''}`);
     m.remove();
     if (app.view === 'inventario') renderArticles();
   };
-  f.onsubmit = (e) => {
-    e.preventDefault();
-    const p = Number(f.percent.value);
-    if (!p || p < 1 || p > 99) return toast('Ingresá un porcentaje entre 1 y 99', 'error');
-    apply(p);
-  };
-  $('#clear', m).onclick = () => apply(0);
 }
 
 // ---------- Clientas ----------

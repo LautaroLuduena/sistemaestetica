@@ -163,3 +163,39 @@ test('resultados: el servicio se mide por su precio de venta el día del turno, 
   assert.ok(!t.services.some((s) => s.name === 'Masaje'));
   assert.equal(t.extra.advanceDeposits, 5000);
 });
+
+test('precios: aumentar o bajar por monto fijo o porcentaje, con redondeo, y descuentos por monto', async () => {
+  const cat = (await call('/api/admin/categories', { method: 'POST', body: { name: 'Precios' } })).data;
+  const other = (await call('/api/admin/categories', { method: 'POST', body: { name: 'Otra' } })).data;
+  const mk = async (name, categoryId, price) =>
+    (await call('/api/admin/articles', { method: 'POST', body: { name, categoryId, publishOnline: false, images: [{ data: PHOTO }], variants: [{ price, stock: 1 }] } })).data;
+  const a = await mk('A', cat.id, 1000);
+  const b = await mk('B', other.id, 2000);
+  const price = async (art) => (await call(`/api/admin/articles/${art.id}`)).data.variants[0];
+  const change = (body) => call('/api/admin/articles/prices', { method: 'POST', body });
+
+  // +$10 solo a la categoría.
+  assert.equal((await change({ action: 'increase', kind: 'amount', value: 10, categoryId: cat.id })).data.variants, 1);
+  assert.equal((await price(a)).price, 1010);
+  assert.equal((await price(b)).price, 2000);
+
+  // +7% a todo, redondeado a $10.
+  await change({ action: 'increase', kind: 'percent', value: 7, round: 10 });
+  assert.equal((await price(a)).price, 1080); // 1010 * 1,07 = 1080,7
+  assert.equal((await price(b)).price, 2140);
+
+  // Descuento de $100 (precio promocional) y después bajar el precio por debajo de la promo: la promo se quita.
+  await change({ action: 'discount', kind: 'amount', value: 100, categoryId: cat.id });
+  assert.equal((await price(a)).promo_price, 980);
+  await change({ action: 'decrease', kind: 'amount', value: 200, categoryId: cat.id });
+  const pa = await price(a);
+  assert.equal(pa.price, 880);
+  assert.equal(pa.promo_price, null);
+
+  // Validaciones.
+  assert.equal((await change({ action: 'increase', kind: 'amount', value: 0 })).status, 400);
+  assert.equal((await change({ action: 'decrease', kind: 'percent', value: 100 })).status, 400);
+  const tooMuch = (await change({ action: 'discount', kind: 'amount', value: 5000, categoryId: cat.id })).data;
+  assert.equal(tooMuch.skipped, 1);
+  assert.equal((await price(a)).promo_price, null);
+});

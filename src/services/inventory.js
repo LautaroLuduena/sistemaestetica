@@ -410,12 +410,25 @@ function deleteArticle(id) {
 }
 
 /**
- * Aplica (o quita, con percent = 0) un descuento a todo el inventario, a una categoría (incluye
- * sus subcategorías) o a artículos puntuales. Se publica como "precio promocional" en la tienda.
+ * Cambios masivos de precio sobre todo el inventario, una categoría (incluye sus subcategorías)
+ * o artículos puntuales:
+ *  - action 'increase' / 'decrease': sube o baja el precio normal.
+ *  - action 'discount': pone un precio promocional (se ve tachado en la tienda; la caja cobra ese).
+ *  - action 'clear': quita los precios promocionales.
+ * kind 'percent' (ej. 10 = 10%) o 'amount' (ej. 10 = $10). round: redondea a múltiplos de 1, 10, 50 o 100.
  */
-function applyDiscount({ percent, categoryId = null, articleIds = null }) {
-  const p = Number(percent);
-  if (!Number.isFinite(p) || p < 0 || p >= 100) throw badRequest('El porcentaje tiene que estar entre 0 y 99');
+function applyPriceChange({ action, kind = 'percent', value = 0, categoryId = null, articleIds = null, round = 1 }) {
+  if (!['increase', 'decrease', 'discount', 'clear'].includes(action)) throw badRequest('Acción de precio inválida');
+  if (!['percent', 'amount'].includes(kind)) throw badRequest('Elegí porcentaje o monto');
+  const v = Number(value);
+  if (action !== 'clear') {
+    if (!Number.isFinite(v) || v <= 0) throw badRequest('Ingresá un valor mayor a cero');
+    if (kind === 'percent' && action !== 'increase' && v >= 100) throw badRequest('El porcentaje tiene que ser menor a 100');
+  }
+  const step = [1, 10, 50, 100].includes(Number(round)) ? Number(round) : 1;
+  const roundTo = (n) => (step === 1 ? round2(n) : Math.round(n / step) * step);
+  const apply = (price) => (kind === 'percent' ? price * (1 + ((action === 'increase' ? 1 : -1) * v) / 100) : price + (action === 'increase' ? v : -v));
+
   const where = ['a.active = 1', 'p.active = 1'];
   const params = [];
   if (categoryId) {
@@ -426,16 +439,47 @@ function applyDiscount({ percent, categoryId = null, articleIds = null }) {
     where.push(`a.id IN (${articleIds.map(() => '?').join(',')})`);
     params.push(...articleIds.map(Number));
   }
-  const rows = db.all(`SELECT p.id, p.price, p.article_id FROM products p JOIN articles a ON a.id = p.article_id WHERE ${where.join(' AND ')}`, ...params);
+  const rows = db.all(
+    `SELECT p.id, p.price, p.promo_price, p.article_id FROM products p JOIN articles a ON a.id = p.article_id WHERE ${where.join(' AND ')}`,
+    ...params
+  );
+  let skipped = 0;
   db.tx(() => {
     for (const r of rows) {
-      const promo = p > 0 ? Math.round(r.price * (1 - p / 100)) : null;
-      db.run(`UPDATE products SET promo_price = ?, updated_at = datetime('now') WHERE id = ?`, promo && promo < r.price ? promo : null, r.id);
+      if (action === 'clear') {
+        db.run(`UPDATE products SET promo_price = NULL, updated_at = datetime('now') WHERE id = ?`, r.id);
+      } else if (action === 'discount') {
+        const promo = roundTo(apply(r.price));
+        // Un descuento que deja el precio en 0 o no lo baja no se aplica.
+        if (promo <= 0 || promo >= r.price) {
+          skipped++;
+          continue;
+        }
+        db.run(`UPDATE products SET promo_price = ?, updated_at = datetime('now') WHERE id = ?`, promo, r.id);
+      } else {
+        const price = roundTo(apply(r.price));
+        if (price <= 0) {
+          skipped++;
+          continue;
+        }
+        // Si el precio baja por debajo del promocional, la promoción deja de tener sentido.
+        const promo = r.promo_price && r.promo_price < price ? r.promo_price : null;
+        db.run(`UPDATE products SET price = ?, promo_price = ?, updated_at = datetime('now') WHERE id = ?`, price, promo, r.id);
+      }
     }
   });
   const articles = [...new Set(rows.map((r) => r.article_id))];
   for (const id of articles) onArticleChange(id, { full: true });
-  return { variants: rows.length, articles: articles.length };
+  return { variants: rows.length - skipped, skipped, articles: articles.length };
+}
+
+// Compatibilidad: descuento por porcentaje (0 = quitar descuentos).
+function applyDiscount({ percent, categoryId = null, articleIds = null }) {
+  const p = Number(percent);
+  if (!Number.isFinite(p) || p < 0 || p >= 100) throw badRequest('El porcentaje tiene que estar entre 0 y 99');
+  return p > 0
+    ? applyPriceChange({ action: 'discount', kind: 'percent', value: p, categoryId, articleIds, round: 1 })
+    : applyPriceChange({ action: 'clear', categoryId, articleIds });
 }
 
 // Variantes para la caja (con nombre completo y precio vigente).
@@ -477,6 +521,7 @@ module.exports = {
   saveArticle,
   deleteArticle,
   applyDiscount,
+  applyPriceChange,
   sellableProducts,
   readImage,
   imageUrl,
