@@ -147,7 +147,8 @@ function build(from, to, { compare = true } = {}) {
 
   // ---- Agregados ----
   const sum = (arr, f) => round2(arr.reduce((t, x) => t + f(x), 0));
-  const margin = (gross, revenue) => (revenue > 0 ? Math.round((gross / revenue) * 1000) / 10 : null);
+  // Margen sobre el costo: ganancia / costo (costo 10.000, venta 20.000 => 100%).
+  const margin = (gain, base) => (base > 0 ? Math.round((gain / base) * 1000) / 10 : null);
   const revenue = sum(lines, (l) => l.revenue);
   const cost = sum(lines, (l) => l.cost);
   const expenses = sum(expenseLines, (e) => e.amount);
@@ -158,8 +159,9 @@ function build(from, to, { compare = true } = {}) {
     expenses,
     net: round2(revenue - cost - expenses),
   };
-  totals.grossMargin = margin(totals.gross, revenue);
-  totals.netMargin = margin(totals.net, revenue);
+  totals.grossMargin = margin(totals.gross, cost);
+  // Rentabilidad neta: lo que quedó sobre todo lo que se gastó (costo de lo vendido + gastos).
+  totals.netMargin = margin(totals.net, round2(cost + expenses));
   if (!compare) return { totals };
 
   const CHANNELS = { services: 'Servicios (turnos)', local_products: 'Productos en el local', web_products: 'Productos en la tienda online', other: 'Otros conceptos' };
@@ -167,7 +169,7 @@ function build(from, to, { compare = true } = {}) {
     const ls = lines.filter((l) => l.channel === key);
     const r = sum(ls, (l) => l.revenue);
     const c = sum(ls, (l) => l.cost);
-    return { key, label, revenue: r, cost: c, gross: round2(r - c), margin: margin(r - c, r), units: ls.reduce((t, l) => t + l.units, 0) };
+    return { key, label, revenue: r, cost: c, gross: round2(r - c), margin: margin(r - c, c), units: ls.reduce((t, l) => t + l.units, 0) };
   });
 
   const group = (filter, extra = () => ({})) => {
@@ -183,7 +185,7 @@ function build(from, to, { compare = true } = {}) {
       map.set(l.key, g);
     }
     return [...map.values()]
-      .map((g) => ({ ...g, revenue: round2(g.revenue), cost: round2(g.cost), gross: round2(g.revenue - g.cost), margin: margin(g.revenue - g.cost, g.revenue) }))
+      .map((g) => ({ ...g, revenue: round2(g.revenue), cost: round2(g.cost), gross: round2(g.revenue - g.cost), margin: margin(g.revenue - g.cost, g.cost) }))
       .sort((x, y) => y.gross - x.gross);
   };
   const services = group((l) => l.channel === 'services');

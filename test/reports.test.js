@@ -84,7 +84,8 @@ test('resultados: ingresos, costos, gastos y ganancia con detalle de servicios y
   db.run('UPDATE products SET cost = 99999 WHERE id = ?', crema.id);
 
   const r = (await call(`/api/admin/reports/results?from=${today}&to=${today}`)).data;
-  assert.deepEqual(r.totals, { revenue: 79000, cost: 18000, gross: 61000, expenses: 52000, net: 9000, grossMargin: 77.2, netMargin: 11.4 });
+  assert.deepEqual(r.totals, { revenue: 79000, cost: 18000, gross: 61000, expenses: 52000, net: 9000, grossMargin: 338.9, netMargin: 12.9 });
+  // 61.000 de ganancia sobre 18.000 de costo = 338,9%; 9.000 netos sobre 70.000 de costos y gastos = 12,9%.
 
   const services = r.channels.find((c) => c.key === 'services');
   assert.equal(services.revenue, 49540.54);
@@ -198,4 +199,20 @@ test('precios: aumentar o bajar por monto fijo o porcentaje, con redondeo, y des
   const tooMuch = (await change({ action: 'discount', kind: 'amount', value: 5000, categoryId: cat.id })).data;
   assert.equal(tooMuch.skipped, 1);
   assert.equal((await price(a)).promo_price, null);
+});
+
+test('margen sobre el costo: costo $10.000 y venta $20.000 = 100%', async () => {
+  const today = nowInTz(settings.get('timezone')).date;
+  const cat = (await call('/api/admin/categories', { method: 'POST', body: { name: 'Margen' } })).data;
+  const art = (
+    await call('/api/admin/articles', {
+      method: 'POST',
+      body: { name: 'Producto margen', categoryId: cat.id, publishOnline: false, images: [{ data: PHOTO }], variants: [{ price: 20000, cost: 10000, stock: 5 }] },
+    })
+  ).data;
+  const list = (await call('/api/admin/articles?q=Producto%20margen')).data.articles;
+  assert.equal(list[0].margin, 100);
+  await call('/api/admin/sales', { method: 'POST', body: { items: [{ productId: art.variants[0].id, quantity: 1 }], method: 'efectivo' } });
+  const r = (await call(`/api/admin/reports/results?from=${today}&to=${today}`)).data;
+  assert.equal(r.products.find((p) => p.name === 'Producto margen').margin, 100);
 });

@@ -184,10 +184,11 @@ function listArticles({ q, categoryId, status } = {}) {
       effective_min: eff.length ? Math.min(...eff) : 0,
       on_promo: variants.some((v) => v.effective_price < v.price),
       missing_cost: variants.some((v) => v.cost === null || v.cost === undefined),
+      // Margen sobre el costo: (precio - costo) / costo. Costo 10.000 y precio 20.000 = 100%.
       margin: (() => {
-        const withCost = variants.filter((v) => v.cost !== null && v.cost !== undefined && v.effective_price > 0);
+        const withCost = variants.filter((v) => v.cost > 0);
         if (!withCost.length) return null;
-        return Math.round((withCost.reduce((t, v) => t + (v.effective_price - v.cost) / v.effective_price, 0) / withCost.length) * 100);
+        return Math.round((withCost.reduce((t, v) => t + (v.effective_price - v.cost) / v.cost, 0) / withCost.length) * 100);
       })(),
       tn_product_id: a.tn_product_id,
       tn_sync_status: a.tn_sync_status,

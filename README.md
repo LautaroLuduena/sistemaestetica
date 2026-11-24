@@ -141,7 +141,8 @@ La sección **Resultados** muestra, para el período elegido (este mes, mes ante
 | **Ingresos** | **Turnos atendidos** por su precio de venta (seña + saldo cobrado, con descuentos; si se marcó atendido sin cobrar el saldo en la caja, el precio del servicio), el día del turno. Señas que se quedan por ausencias o cancelaciones sin devolución. Servicios y productos vendidos en la caja (con descuentos) y ventas pagadas de la tienda online. Las señas de turnos futuros no son ingreso todavía (se muestran aparte). El envío cobrado en la web no se cuenta como ingreso. |
 | **Costo de lo vendido** | Productos: el **costo** cargado en cada artículo/variante del Inventario. Servicios: el **costo por sesión** (insumos) de cada servicio, por cada turno atendido. |
 | **Gastos** | Los cargados en *Resultados → Gastos* (alquiler, sueldos, servicios, publicidad, comisiones, impuestos…) y los egresos de caja. Los retiros de dinero del dueño no son gasto. |
-| **Ganancia bruta / neta** | Ingresos − costo / ingresos − costo − gastos, con su margen. |
+| **Ganancia bruta / neta** | Ingresos − costo / ingresos − costo − gastos. |
+| **Margen** | Sobre el costo: (precio de venta − costo) ÷ costo. Ej.: costo $10.000 y venta $20.000 = 100%. La ganancia neta se muestra como porcentaje sobre el costo más los gastos. |
 
 Al vender se guarda el costo de ese momento, así que cambiar un costo después no altera los resultados pasados. Si algún producto o servicio no tiene costo cargado, el informe lo avisa (la ganancia daría más alta de lo real). La compra de mercadería no se carga como gasto: su costo se cuenta cuando se vende.
 

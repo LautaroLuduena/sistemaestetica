@@ -1167,9 +1167,9 @@ async function renderResults(from, to) {
     <div class="grid kpis">
       ${tile('Ingresos', fmtMoney(t.revenue), 'ventas y turnos atendidos', delta(t.revenue, p.revenue))}
       ${tile('Costo de lo vendido', fmtMoney(t.cost), 'productos + insumos de servicios', delta(t.cost, p.cost, { invert: true }))}
-      ${tile('Ganancia bruta', fmtMoney(t.gross), `margen ${pct(t.grossMargin)}`, delta(t.gross, p.gross))}
+      ${tile('Ganancia bruta', fmtMoney(t.gross), `margen ${pct(t.grossMargin)} sobre el costo`, delta(t.gross, p.gross))}
       ${tile('Gastos', fmtMoney(t.expenses), 'alquiler, sueldos, servicios…', delta(t.expenses, p.expenses, { invert: true }))}
-      ${tile('Ganancia neta', `<span style="color:${t.net < 0 ? 'var(--danger)' : 'inherit'}">${fmtMoney(t.net)}</span>`, `margen ${pct(t.netMargin)}`, delta(t.net, p.net))}
+      ${tile('Ganancia neta', `<span style="color:${t.net < 0 ? 'var(--danger)' : 'inherit'}">${fmtMoney(t.net)}</span>`, `${pct(t.netMargin)} sobre costos y gastos`, delta(t.net, p.net))}
     </div>
     <p class="muted" style="margin:-0.4rem 0 1rem">${
       hasPrevious
@@ -1975,7 +1975,7 @@ async function articleModal(a = null) {
     const val = (k) => Number(($(`[data-vf="${k}"][data-row="0"]`, m) || {}).value) || 0;
     const price = val('promo_price') && val('promo_price') < val('price') ? val('promo_price') : val('price');
     const cost = val('cost');
-    hint.textContent = price && cost ? `Ganancia por unidad: ${fmtMoney(price - cost)} (${Math.round(((price - cost) / price) * 100)}%)` : '';
+    hint.textContent = price && cost ? `Ganancia por unidad: ${fmtMoney(price - cost)} (margen ${Math.round(((price - cost) / cost) * 100)}% sobre el costo)` : '';
   }
   m.addEventListener('input', (e) => e.target.matches('[data-vf]') && updateMarginHint());
   const renderVariants = () => {
@@ -2512,7 +2512,7 @@ const CONFIG_TABS = {
         .map(
           (s) => `<tr><td>${esc(s.name)}</td><td class="num">${s.duration_min} min</td><td class="num">${fmtMoney(s.price)}</td><td class="num">${fmtMoney(s.deposit_amount)}</td>
           <td class="num">${s.cost === null || s.cost === undefined ? '<span class="badge warn">sin costo</span>' : fmtMoney(s.cost)}</td>
-          <td class="num">${s.cost === null || s.cost === undefined || !s.price ? '-' : `${Math.round(((s.price - s.cost) / s.price) * 100)}%`}</td>
+          <td class="num">${!(s.cost > 0) ? '-' : `${Math.round(((s.price - s.cost) / s.cost) * 100)}%`}</td>
           <td>${s.active ? '<span class="badge ok">Activo</span>' : '<span class="badge gray">Inactivo</span>'}</td>
           <td><button class="secondary small" data-edit="${s.id}">Editar</button></td></tr>`
         )
